@@ -5,6 +5,8 @@ import {
   LogOut,
   Mic,
   MicOff,
+  Monitor,
+  MonitorOff,
   Radio,
   RefreshCw,
   Video,
@@ -14,13 +16,14 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, useLocation, useParams } from 'react-router-dom'
 import { normalizeRoomName } from '@/types/room'
-import { cn } from '@/lib/cn'
 import { clearSignalFragment, readSignalFromFragment } from '@/services/signaling/invite-link'
 import { streamRegistry } from '@/services/media/stream-registry'
+import { GUEST_SCREEN_KEY } from '@/hooks/useGuestScreenShare'
 import { readJson, writeJson } from '@/services/persistence/local-store'
 import { useCamera } from '@/hooks/useCamera'
 import { useMicrophone } from '@/hooks/useMicrophone'
 import { useAudioMixer } from '@/hooks/useAudioMixer'
+import { useGuestScreenShare } from '@/hooks/useGuestScreenShare'
 import { useGuestSession } from '@/hooks/useGuestSession'
 import { useInviteLink } from '@/hooks/useInviteLink'
 import { useMediaDevices } from '@/hooks/useMediaDevices'
@@ -34,9 +37,9 @@ import { DeviceButton } from '@/components/shared/DeviceButton'
 import { TextField } from '@/components/shared/Field'
 import { Notice, StatusDot } from '@/components/shared/Status'
 import { LevelMeter } from '@/components/audio/LevelMeter'
-import { ParticipantTile } from '@/components/guests/ParticipantTile'
+import { CallGrid, type CallTile } from '@/components/guests/CallGrid'
+import { VideoTile } from '@/components/guests/VideoTile'
 import { useIsSpeaking } from '@/hooks/useIsSpeaking'
-import { SpeakingIndicator } from '@/components/audio/SpeakingIndicator'
 
 /**
  * `/push/:room` — the guest view.
@@ -50,18 +53,21 @@ import { SpeakingIndicator } from '@/components/audio/SpeakingIndicator'
  * is a sender, and anything else here is something for a nervous guest to get
  * wrong.
  *
- * THE STAGE DEPENDS ON WHETHER A DIRECTOR IS IN THE ROOM
- * ------------------------------------------------------
- * With a director, the stage is the **composed program** and the other guests
- * are a strip beneath it. The program is what is going to air, including this
- * guest framed the way the director framed them, so it is the thing to give
- * the space to — a participant grid would be a second, parallel answer to
- * "what is happening", and the wrong one to trust.
+ * EVERYONE IS IN ONE GRID
+ * -----------------------
+ * Including this guest's own camera. The program, when a director is in the
+ * room, is a cell like any other — just a *featured* one, because a composed
+ * production is only useful large while faces stay readable small.
  *
- * With no director the room is just a call, so the stage *is* the participant
- * grid. A room full of guests and no control room is a supported
- * configuration: guests connect to each other in a full mesh, so one can be
- * created and used with nobody producing it.
+ * This replaced a stage-plus-strip arrangement that described the roles rather
+ * than what was worth looking at: a director with no sources started produced
+ * an empty program, and an empty program is a black canvas, so the view became
+ * one enormous black rectangle with the actual participants tucked into the
+ * corners. See `components/guests/CallGrid.tsx`.
+ *
+ * A room full of guests and no control room is a supported configuration —
+ * guests connect to each other in a full mesh — so the grid has to work with
+ * no featured cell at all.
  *
  * TWO WAYS IN, AND THE PAGE KNOWS WHICH IT IS
  * -------------------------------------------
@@ -104,6 +110,7 @@ export function PushPage() {
   const microphone = useMicrophone()
   const mixer = useAudioMixer()
   const guestSession = useGuestSession()
+  const screenShare = useGuestScreenShare()
   const invite = useInviteLink()
 
   const [ready, setReady] = useState(false)
@@ -120,8 +127,6 @@ export function PushPage() {
   const [answerUrl, setAnswerUrl] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [roomLinkCopied, setRoomLinkCopied] = useState(false)
-  const selfViewRef = useRef<HTMLVideoElement | null>(null)
-  const stageRef = useRef<HTMLVideoElement | null>(null)
 
   const webrtc = useWebRTC({
     send: 'camera',
@@ -276,41 +281,18 @@ export function PushPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webrtc.signaling.lastEnvelope, answerUrl, room, roomsSupported])
 
-  /** Bind the local camera to the self-view. */
+  /*
+   * Tell the room when this guest starts or stops sharing.
+   *
+   * Re-announced when the peer set changes as well, because somebody who joins
+   * mid-share would otherwise lay the shared screen out as a face until the
+   * sharer happened to toggle it.
+   */
   useEffect(() => {
-    const element = selfViewRef.current
-    if (!element) return
-    const key = camera.source?.streamKey
-    const stream = key ? streamRegistry.getStream(key) : null
-    if (element.srcObject !== stream) element.srcObject = stream
-    if (stream) {
-      void element.play().catch(() => {
-        // Autoplay refused; the guest still sees the controls.
-      })
-    }
-    return () => {
-      // A viewer, not an owner — the registry owns the tracks.
-      element.srcObject = null
-    }
-  }, [camera.source?.streamKey, camera.status, joinedAs])
-
-  /** Bind the director's program feed to the main stage. */
-  useEffect(() => {
-    const element = stageRef.current
-    if (!element) return
-    const stream = webrtc.programStream
-    if (element.srcObject !== stream) element.srcObject = stream
-    if (stream) {
-      void element.play().catch(() => {
-        // Autoplay with sound can be refused until the guest interacts. They
-        // have already clicked Join, so this is unexpected — but a frozen
-        // frame beats an exception.
-      })
-    }
-    return () => {
-      element.srcObject = null
-    }
-  }, [webrtc.programStream])
+    if (!joinedAs) return
+    webrtc.announceSharing(screenShare.sharing)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenShare.sharing, joinedAs, webrtc.participants.length])
 
   useEffect(() => {
     if (parameters.unknown.length === 0) return
@@ -345,49 +327,102 @@ export function PushPage() {
   if (!rawRoom || !room) return <Navigate to="/" replace />
 
   const connected = peer?.status === 'connected'
-  /*
-   * Everyone except the director.
-   *
-   * The director's feed is the stage when there is one, so including it in the
-   * participant list would show the program twice.
-   */
-  const participantsWithoutDirector = webrtc.participants.filter(
-    (participant) => participant.role !== 'director',
-  )
   const mirroredSelf = parameters.mirror || camera.mirrored
   const inLobby = roomsSupported && !joinedAs
   const permissionDenied = camera.status === 'denied' || microphone.status === 'denied'
 
-  /* -------------------------------------------------------------- self video */
-  const selfVideo = (
-    <>
-      {camera.active ? (
-        <video
-          ref={selfViewRef}
-          muted
-          playsInline
-          aria-label="Your camera preview"
-          className={cn('h-full w-full object-cover', mirroredSelf && 'scale-x-[-1]')}
-        />
-      ) : (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-ink-500">
-          <VideoOff aria-hidden="true" className="h-6 w-6" />
-          <p className="px-2 text-center text-[11px] leading-tight">
-            {camera.status === 'denied'
-              ? 'Camera blocked'
-              : camera.status === 'unavailable'
-                ? 'No camera'
-                : 'Camera off'}
-          </p>
-        </div>
-      )}
-      {guestSession.cameraMutedByDirector ? (
-        <p className="absolute top-1 left-1 bg-live-500 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-white uppercase">
-          Muted by director
-        </p>
-      ) : null}
-    </>
-  )
+  /**
+   * Not audible: the microphone is off, or muted.
+   *
+   * Declared before the tiles because the self tile reports it — a muted
+   * participant is never shown as speaking, whatever the pre-fader meter says.
+   */
+  const micOff = !microphone.active || microphone.muted
+
+  /* ------------------------------------------------------------------ tiles */
+  const cameraStream = camera.source?.streamKey
+    ? streamRegistry.getStream(camera.source.streamKey)
+    : null
+
+  const cameraEmptyLabel =
+    camera.status === 'denied'
+      ? 'Camera blocked'
+      : camera.status === 'unavailable'
+        ? 'No camera'
+        : guestSession.cameraMutedByDirector
+          ? 'Muted by director'
+          : 'Camera off'
+
+  /**
+   * Own camera, always muted.
+   *
+   * It is a second rendering of audio the microphone is already capturing, and
+   * playing a live microphone back into the room is an acoustic feedback loop.
+   */
+  const screenStream = screenShare.sharing
+    ? streamRegistry.getStream(GUEST_SCREEN_KEY)
+    : null
+
+  const selfTile: CallTile = {
+    key: 'self',
+    // What the room is seeing from this guest: the screen while sharing,
+    // because that is what the outgoing track carries.
+    stream: screenStream ?? (camera.active ? cameraStream : null),
+    label: `${displayName} (you)`,
+    muted: true,
+    // Never mirror a screen: text would be backwards.
+    mirrored: screenStream ? false : mirroredSelf,
+    speaking,
+    micMuted: micOff,
+    ...(screenStream ? { badge: 'sharing' } : {}),
+    emptyLabel: cameraEmptyLabel,
+    featured: Boolean(screenStream),
+  }
+
+  /*
+   * The program, when a director is in the room, is the featured cell.
+   *
+   * Labelled rather than left as an unexplained rectangle: an empty program is
+   * a black canvas, and a black cell with a caption is a state you can reason
+   * about, while a black screen is just broken-looking.
+   */
+  const directorParticipant = webrtc.participants.find((entry) => entry.role === 'director')
+  const someoneIsSharing =
+    screenShare.sharing || webrtc.participants.some((entry) => entry.sharingScreen)
+  const tiles: CallTile[] = [
+    ...(webrtc.programStream
+      ? [
+          {
+            key: 'program',
+            stream: webrtc.programStream,
+            label: 'Program',
+            muted: false,
+            badge: 'director',
+            emptyLabel: 'Waiting for the program',
+            // Yields to a live screen share: the program is always there,
+            // whereas somebody sharing is a thing that just happened.
+            featured: !someoneIsSharing,
+          } satisfies CallTile,
+        ]
+      : []),
+    ...webrtc.participants
+      .filter((participant) => participant !== directorParticipant)
+      .map(
+        (participant): CallTile => ({
+          key: participant.peerId,
+          stream: participant.stream,
+          label: participant.label,
+          // The only thing playing this person's voice.
+          muted: false,
+          emptyLabel: 'Connecting…',
+          ...(participant.sharingScreen ? { badge: 'sharing' } : {}),
+          // A shared screen is only useful large, so it takes the featured
+          // cell — ahead of the program, because somebody shared it *now*.
+          featured: participant.sharingScreen,
+        }),
+      ),
+    selfTile,
+  ]
 
   /* ------------------------------------------------------------- mic / cam */
   const toggleCamera = () => {
@@ -408,8 +443,6 @@ export function PushPage() {
     const ok = await microphone.start()
     if (ok && parameters.startMuted) microphone.setMuted(true)
   }
-
-  const micOff = !microphone.active || microphone.muted
 
   /**
    * Switch camera device, starting it if it is off.
@@ -534,9 +567,14 @@ export function PushPage() {
               </p>
             </div>
 
-            <div className="relative aspect-video overflow-hidden border border-deck-700 bg-deck-950">
-              {selfVideo}
-            </div>
+            <VideoTile
+              stream={camera.active ? cameraStream : null}
+              label={displayName}
+              muted
+              mirrored={mirroredSelf}
+              emptyLabel={cameraEmptyLabel}
+              className="aspect-video w-full"
+            />
 
             {/*
               Pre-join device controls, the way a meeting lobby works: toggle
@@ -617,49 +655,23 @@ export function PushPage() {
             </div>
           ) : null}
 
-          {/* ------------------------------------------------------- stage */}
-          <div className="relative flex min-h-0 flex-1 flex-col gap-2 bg-black p-2">
-            {webrtc.programStream ? (
+          {/* -------------------------------------------------------- grid */}
+          <div className="flex min-h-0 flex-1 flex-col gap-2 bg-black p-2">
+            {webrtc.participants.length === 0 && !webrtc.programStream ? (
               /*
-               * `h-full w-full`, not `max-h-full max-w-full`.
-               *
-               * A max-* pair caps the element at its *intrinsic* size, so a
-               * 720p program sat at 1280×720 in the middle of a larger stage
-               * and refused to grow. Sizing to the container and letting
-               * `object-contain` letterbox fills the space given while still
-               * never distorting the aspect.
+               * Alone in the room. Still shows the own tile through the grid
+               * below, but leads with what to do about it — a room with one
+               * person in it is a room waiting for a link to be sent.
                */
-              <video
-                ref={stageRef}
-                autoPlay
-                playsInline
-                aria-label="The director's program feed"
-                className="min-h-0 w-full flex-1 bg-black object-contain"
-              />
-            ) : participantsWithoutDirector.length > 0 ? (
-              /*
-               * No director: the room is a call, so the participants *are* the
-               * stage. `auto-fit` rather than a fixed column count, so one
-               * other person gets the whole width and five share it — the
-               * grid follows the room instead of the room being squeezed into
-               * a layout chosen in advance.
-               */
-              <div className="grid min-h-0 w-full flex-1 content-center gap-2 overflow-y-auto [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-                {participantsWithoutDirector.map((participant) => (
-                  <ParticipantTile key={participant.peerId} participant={participant} />
-                ))}
-              </div>
-            ) : (
-              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-center text-ink-500">
-                <Radio aria-hidden="true" className="h-8 w-8" />
+              <div className="flex shrink-0 flex-col items-center gap-2 pt-2 text-center">
                 <p className="text-sm text-ink-300">
                   {peer?.status === 'failed'
                     ? 'The connection failed.'
                     : 'You are the only one here.'}
                 </p>
                 <p className="max-w-sm text-[11px] leading-relaxed text-ink-500">
-                  Send the room link to whoever should join. If a director opens this room, their
-                  composed program takes over this space.
+                  Send the room link to whoever should join. A director is not required — guests in
+                  the same room see each other.
                 </p>
                 {roomsSupported ? (
                   <Button variant="outline" size="sm" onClick={() => void copyRoomLink()}>
@@ -672,55 +684,35 @@ export function PushPage() {
                   </Button>
                 ) : null}
               </div>
-            )}
-
-            {/*
-              With a director on the stage, the other guests go in a strip.
-
-              Fixed height and horizontally scrollable: the program is the
-              thing being watched, so a growing number of participants must not
-              eat into it.
-            */}
-            {webrtc.programStream && participantsWithoutDirector.length > 0 ? (
-              <div className="flex shrink-0 gap-2 overflow-x-auto pb-1">
-                {participantsWithoutDirector.map((participant) => (
-                  <ParticipantTile
-                    key={participant.peerId}
-                    participant={participant}
-                    className="h-24 w-40 shrink-0 sm:h-28 sm:w-48"
-                  />
-                ))}
-              </div>
             ) : null}
 
-            {/*
-              Self-view, floating over the stage the way a meeting does.
-
-              A `figure`/`figcaption` rather than a div and a paragraph: this is
-              a thumbnail *with a caption naming who it is*, which is exactly
-              what the pair means, and it gives the name a real relationship to
-              the video instead of being loose text positioned nearby.
-            */}
-            <figure
-              className={cn(
-                'absolute right-3 bottom-3 m-0 aspect-video w-32 overflow-hidden border bg-deck-950 shadow-lg transition-colors sm:w-44',
-                // The ring is the "you are being heard" signal, replacing the
-                // meter that used to sit in the control bar.
-                speaking ? 'border-accent-400' : 'border-deck-600',
-              )}
-            >
-              {selfVideo}
-              <figcaption className="absolute bottom-0 left-0 flex items-center gap-1 bg-black/60 px-1.5 py-0.5 text-[10px] text-white/80">
-                <SpeakingIndicator speaking={speaking} muted={micOff} />
-                {displayName}
-              </figcaption>
-            </figure>
+            <CallGrid tiles={tiles} />
           </div>
 
           {/* -------------------------------------------------- control bar */}
           <div className="flex shrink-0 flex-col gap-2 border-t border-deck-700 bg-deck-900 px-3 py-2">
             <div className="flex items-center justify-center gap-2">
               {mediaControls}
+
+              <Button
+                variant={screenShare.sharing ? 'live' : 'outline'}
+                size="sm"
+                aria-pressed={screenShare.sharing}
+                disabled={screenShare.busy || screenShare.unsupported}
+                title={
+                  screenShare.unsupported
+                    ? 'This browser cannot share a screen'
+                    : 'Share a screen or window instead of your camera'
+                }
+                onClick={screenShare.toggle}
+              >
+                {screenShare.sharing ? (
+                  <MonitorOff aria-hidden="true" className="h-3.5 w-3.5" />
+                ) : (
+                  <Monitor aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+                {screenShare.sharing ? 'Stop sharing' : 'Share screen'}
+              </Button>
 
               {roomsSupported ? (
                 <>

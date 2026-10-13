@@ -18,7 +18,6 @@ import { useMediaSources } from '@/hooks/useMediaSources'
 import { useProgramPublisher } from '@/hooks/useProgramMirror'
 import { useRecording } from '@/hooks/useRecording'
 import { useSceneManager } from '@/hooks/useSceneManager'
-import { useScreenShare } from '@/hooks/useScreenShare'
 import { useSolo } from '@/hooks/useSolo'
 import { useSourceTransform } from '@/hooks/useSourceTransform'
 import type { UseWebRTC } from '@/hooks/useWebRTC'
@@ -135,7 +134,6 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
   const solo = useSolo()
   const scenes = useSceneManager()
   const recording = useRecording()
-  const screen = useScreenShare()
   const sources = useMediaSources()
   const invite = useInviteLink()
 
@@ -186,7 +184,6 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
 
   useHotkeys({
     toggleRecording: () => (recording.isRecording ? recording.stop() : void recording.start()),
-    toggleScreenShare: () => void screen.toggle(),
     openCommandPalette: () => openDialog('command-palette'),
     deleteSelection,
     nextScene: () => scenes.stepScene(1),

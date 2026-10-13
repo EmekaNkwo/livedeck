@@ -18,7 +18,6 @@ import { useStudioStore } from '@/stores/studioStore'
 
 export type HotkeyActions = {
   toggleRecording: () => void
-  toggleScreenShare: () => void
   openCommandPalette: () => void
   deleteSelection: () => void
   nextScene: () => void
@@ -93,11 +92,6 @@ export function useHotkeys(actions: HotkeyActions): void {
       if (modifier && event.shiftKey && event.key.toLowerCase() === 'r') {
         event.preventDefault()
         actions.toggleRecording()
-        return
-      }
-      if (modifier && event.shiftKey && event.key.toLowerCase() === 's') {
-        event.preventDefault()
-        actions.toggleScreenShare()
         return
       }
       if (modifier && !event.shiftKey && event.key.toLowerCase() === 'k') {

@@ -4,15 +4,12 @@ import {
   FlipHorizontal,
   Mic,
   MicOff,
-  Monitor,
-  MonitorOff,
   RefreshCw,
 } from 'lucide-react'
 import type { CaptureStatus } from '@/types/media'
 import { useCamera, CAMERA_RESOLUTIONS } from '@/hooks/useCamera'
 import { useMediaDevices } from '@/hooks/useMediaDevices'
 import { useMicrophone } from '@/hooks/useMicrophone'
-import { useScreenShare } from '@/hooks/useScreenShare'
 import { useAudioMixer } from '@/hooks/useAudioMixer'
 import { detectCapabilities } from '@/lib/capabilities'
 import { useAudioStore } from '@/stores/audioStore'
@@ -23,7 +20,12 @@ import { Notice, StatusDot } from '@/components/shared/Status'
 import type { StatusTone } from '@/components/shared/Status'
 
 /**
- * Camera, microphone and screen capture controls.
+ * Camera and microphone capture controls.
+ *
+ * No screen share. The control room's job is to conduct and structure scenes
+ * out of what the room sends it; the material itself comes from participants.
+ * A guest shares their screen from the guest view, and it arrives here as that
+ * guest's feed like any other.
  *
  * Every status shown here is derived from the real capture state, so the panel
  * cannot display an active device that is not running. Permission-denied and
@@ -36,7 +38,6 @@ export function CaptureControls() {
   const devices = useMediaDevices()
   const camera = useCamera()
   const microphone = useMicrophone()
-  const screen = useScreenShare()
   const mixer = useAudioMixer()
   const programMonitoring = useAudioStore((state) => state.programMonitoring)
 
@@ -242,71 +243,6 @@ export function CaptureControls() {
               message="No microphone is available. Connect one, or continue without audio."
               onRetry={() => void microphone.retry()}
               onRefreshDevices={() => void devices.refresh()}
-            />
-          ) : null}
-        </section>
-
-        {/* ------------------------------------------------ screen share */}
-        <section className="flex flex-col gap-2" aria-label="Screen sharing">
-          <div className="flex items-center gap-2">
-            <Monitor aria-hidden="true" className="h-3.5 w-3.5 text-ink-400" />
-            <h3 className="text-[11px] font-semibold tracking-wide text-ink-300 uppercase">
-              Screen
-            </h3>
-            <StatusDot
-              {...captureStatusProps(screen.status, screen.active)}
-              className="ml-auto"
-            />
-          </div>
-
-          {screen.active ? (
-            <Button variant="secondary" size="sm" onClick={screen.stop}>
-              <MonitorOff aria-hidden="true" className="h-3.5 w-3.5" />
-              Stop sharing
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={!capabilities.getDisplayMedia}
-              onClick={() => void screen.start({ withAudio: true })}
-            >
-              <Monitor aria-hidden="true" className="h-3.5 w-3.5" />
-              {screen.status === 'requesting' ? 'Choosing…' : 'Share screen'}
-            </Button>
-          )}
-
-          {!capabilities.getDisplayMedia ? (
-            <Notice tone="warning">
-              Screen sharing is not available in this browser.
-            </Notice>
-          ) : (
-            <Notice>
-              Your browser decides which screens, windows and tabs you may pick, and shows its own
-              picker — the app cannot choose a target for you.
-              {screen.surfaceLabel ? (
-                <>
-                  {' '}
-                  Currently sharing: <strong className="text-ink-200">{screen.surfaceLabel}</strong>
-                  .
-                </>
-              ) : null}
-            </Notice>
-          )}
-
-          {screen.active ? (
-            <Notice tone={screen.hasDisplayAudio ? 'info' : 'warning'}>
-              {screen.hasDisplayAudio
-                ? 'Display audio is being captured and has its own mixer channel, separate from your microphone.'
-                : (screen.audioUnavailableReason ??
-                  'No display audio track was provided by this platform.')}
-            </Notice>
-          ) : null}
-
-          {screen.status === 'error' ? (
-            <RecoveryNotice
-              message="Screen sharing could not be started."
-              onRetry={() => void screen.start({ withAudio: true })}
             />
           ) : null}
         </section>

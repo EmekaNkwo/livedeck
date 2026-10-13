@@ -100,14 +100,6 @@ export async function startMicrophone(page: Page): Promise<void> {
   ).toBeVisible()
 }
 
-export async function shareScreen(page: Page): Promise<void> {
-  await openTab(page, /Sources/)
-  await page.getByRole('button', { name: /Share screen/i }).click()
-  await expect(
-    page.getByRole('region', { name: 'Screen sharing' }).getByText('Active', { exact: true }),
-  ).toBeVisible()
-}
-
 /** Read the program canvas's backing-store size — the real output resolution. */
 export async function canvasSize(page: Page): Promise<{ width: number; height: number }> {
   return page.locator('canvas').first().evaluate((element) => {

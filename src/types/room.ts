@@ -68,6 +68,15 @@ export type GuestMessage =
   /** The guest's *actual* track state after applying a control message. */
   | { v: 1; type: 'state'; micMuted: boolean; cameraMuted: boolean }
   | { v: 1; type: 'pong'; at: number }
+  /**
+   * This participant started or stopped sharing a screen.
+   *
+   * Needed because a screen share arrives as an ordinary video track — there
+   * is nothing in WebRTC that says what a track is *of*. Without being told,
+   * the receiving side cannot know to give it more of the layout, and a shared
+   * document would be rendered at the size of a face.
+   */
+  | { v: 1; type: 'sharing'; sharing: boolean }
 
 export type AnyChannelMessage = ControlMessage | GuestMessage
 
@@ -140,6 +149,13 @@ export function parseChannelMessage(raw: string): AnyChannelMessage | null {
     case 'state':
       return typeof message.micMuted === 'boolean' && typeof message.cameraMuted === 'boolean'
         ? { v: 1, type: 'state', micMuted: message.micMuted, cameraMuted: message.cameraMuted }
+        : null
+    case 'sharing':
+      // Strict, like every other case here: `sharing: "true"` is rejected
+      // rather than coerced. This is remote input from a peer that can send
+      // anything, and it drives layout.
+      return typeof message.sharing === 'boolean'
+        ? { v: 1, type: 'sharing', sharing: message.sharing }
         : null
     default:
       return null

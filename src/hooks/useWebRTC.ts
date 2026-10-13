@@ -80,6 +80,14 @@ export type RemoteParticipant = {
   label: string
   role: 'director' | 'guest'
   stream: MediaStream | null
+  /**
+   * This participant's video track is carrying a screen, not a camera.
+   *
+   * Reported by them over the control channel, because nothing in WebRTC says
+   * what a track is *of* — a shared document and a face arrive as the same
+   * kind of video. The receiving layout needs to know to give it more room.
+   */
+  sharingScreen: boolean
 }
 
 export type UseWebRTC = {
@@ -91,6 +99,8 @@ export type UseWebRTC = {
    * Includes the director when there is one; `programStream` picks it out.
    */
   participants: RemoteParticipant[]
+  /** Tell every peer whether this one is now sharing a screen. */
+  announceSharing: (sharing: boolean) => void
   /**
    * The director's program output, when a director is in the room.
    *
@@ -239,8 +249,9 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
           peerId: peer.peerId,
           label: peer.label,
           role: peer.role,
-          // Preserve a stream that somehow arrived first.
+          // Preserve anything that arrived before the announcement.
           stream: current[peer.peerId]?.stream ?? null,
+          sharingScreen: current[peer.peerId]?.sharingScreen ?? false,
         },
       }))
 
@@ -341,6 +352,16 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
         onStats: (peerId, stats) => setPeerStats(peerId, stats),
         onControlState: (controlState) => setControlState(controlState),
         onControlMessage: (_peerId, message) => onControlMessageRef.current?.(message),
+        onGuestMessage: (peerId, message) => {
+          // The only guest-originated message that changes what the receiver
+          // renders. The rest describe track state the control room shows.
+          if (message.type !== 'sharing') return
+          setParticipantMap((current) => {
+            const existing = current[peerId]
+            if (!existing) return current
+            return { ...current, [peerId]: { ...existing, sharingScreen: message.sharing } }
+          })
+        },
         onRemoteStream: (peerId, stream) => {
           const known = rosterRef.current.get(peerId)
           setParticipantMap((current) => ({
@@ -353,6 +374,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
               label: known?.label ?? current[peerId]?.label ?? 'Guest',
               role: known?.role ?? current[peerId]?.role ?? 'guest',
               stream,
+              sharingScreen: current[peerId]?.sharingScreen ?? false,
             },
           }))
 
@@ -414,16 +436,32 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
 
     if (send === 'camera') {
       /*
-       * Build a stream from whatever camera/microphone captures are live. The
-       * tracks belong to the StreamRegistry, so they are referenced here but
-       * never stopped — the registry's refcount owns their lifetime.
+       * Build a stream from whatever captures are live. The tracks belong to
+       * the StreamRegistry, so they are referenced here but never stopped —
+       * the registry's refcount owns their lifetime.
+       *
+       * A shared screen *replaces* the camera rather than joining it. One
+       * outgoing video track means no renegotiation with every peer in the
+       * mesh when sharing starts, and no doubling of a guest's upload for the
+       * duration. The visible trade is that a sharing guest's camera is not
+       * going out, including into the director's program.
        */
       const outgoing = new MediaStream()
+      const screenKey = streamRegistry
+        .keys()
+        .find((key) => key.startsWith('screen:'))
+      const videoKey =
+        screenKey ?? streamRegistry.keys().find((key) => key.startsWith('camera:'))
+
+      const videoStream = videoKey ? streamRegistry.getStream(videoKey) : null
+      for (const track of videoStream?.getVideoTracks() ?? []) outgoing.addTrack(track)
+
       for (const key of streamRegistry.keys()) {
-        if (!key.startsWith('camera:') && !key.startsWith('mic:')) continue
+        if (!key.startsWith('mic:')) continue
         const stream = streamRegistry.getStream(key)
-        for (const track of stream?.getTracks() ?? []) outgoing.addTrack(track)
+        for (const track of stream?.getAudioTracks() ?? []) outgoing.addTrack(track)
       }
+
       void peerManager.setLocalStream(outgoing.getTracks().length > 0 ? outgoing : null)
       return () => {
         void peerManager.setLocalStream(null)
@@ -605,6 +643,18 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
     [showToast, signaling],
   )
 
+  /**
+   * Tell every peer whether this one is sharing a screen.
+   *
+   * Broadcast rather than sent per peer, and re-sent when the peer set
+   * changes, because a participant who joins mid-share would otherwise lay out
+   * a shared document as though it were a face until the sharer happened to
+   * toggle.
+   */
+  const announceSharing = useCallback((sharing: boolean) => {
+    peerManager.broadcastControl({ v: 1, type: 'sharing', sharing })
+  }, [])
+
   const closePeer = useCallback(
     (peerId: string) => {
       peerManager.closePeer(peerId)
@@ -664,6 +714,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   return {
     supported: peerManager.isSupported(),
     peers: Object.values(peerStates),
+    announceSharing,
     participants,
     programStream,
     connectivity,

@@ -142,6 +142,12 @@ export class ControlChannel {
       case 'hello':
         this.events.onGuestMessage?.(message)
         return
+      case 'sharing':
+        // A peer reporting what its own video track now carries. Routed like
+        // the other guest-originated messages: it describes the sender, it
+        // does not ask the receiver to do anything to its hardware.
+        this.events.onGuestMessage?.(message)
+        return
       default:
         this.events.onControl?.(message)
     }

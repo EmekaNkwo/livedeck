@@ -67,6 +67,7 @@ Camera / Screen / Guest sources
 - [Solo links share one feed](#solo-links-share-one-feed)
 - [Invite links (Manual mode)](#invite-links-manual-mode)
 - [URL parameters](#url-parameters)
+- [Who can share a screen](#who-can-share-a-screen)
 - [A room does not need a director](#a-room-does-not-need-a-director)
 - [The guest view is a meeting, not a studio](#the-guest-view-is-a-meeting-not-a-studio)
 - [Director controls](#director-controls)
@@ -153,7 +154,7 @@ the diagnostics panel with an explanation of what degrades.
 | Secure context | All capture | **Blocking** — nothing can be captured |
 | `getUserMedia` | Camera, microphone | **Blocking** |
 | `canvas.captureStream` | Recording, peer sending | **Blocking** for output |
-| `getDisplayMedia` | Screen sharing | Screen share hidden |
+| `getDisplayMedia` | A guest sharing a screen | Share button disabled |
 | `MediaRecorder` | Recording | Composition and preview still work |
 | Web Audio API | Mixing, meters, recorded audio | Video-only recording |
 | `RTCPeerConnection` | Peer Connection Mode | Local Studio Mode unaffected |
@@ -337,6 +338,27 @@ documented without being implemented, or vice versa.
 browsers will not start an `AudioContext` without a user gesture — promising
 otherwise would just produce a silent guest.
 
+### Who can share a screen
+
+**Guests can. The control room cannot.** The director's role is to conduct and
+structure scenes out of what the room sends it; the material comes from the
+participants. There is no screen capture in the control room at all — no
+button, no command, no shortcut.
+
+A guest shares from the guest view, and it **replaces their camera** rather
+than joining it. One outgoing video track means no renegotiation with every
+peer in the mesh when a share starts, and no doubling of that guest's upload
+for its duration. The trade is explicit and is the one every meeting tool
+makes: while sharing, that guest's camera is not going out — to anyone,
+including the director's program, where their feed becomes the screen.
+
+Nothing in WebRTC says what a track is *of* — a shared document and a face
+arrive as the same kind of video — so the sharer reports it over the control
+channel (`{type: 'sharing'}`), validated as strictly as every other message
+because it is remote input that drives layout. Receivers give that tile the
+featured cell. It is re-announced whenever the peer set changes, or somebody
+joining mid-share would lay a shared document out at the size of a face.
+
 ### A room does not need a director
 
 Guests in the same room connect to **each other**, so a room works as a plain
@@ -385,6 +407,12 @@ What the stage shows depends on whether a director is in the room:
   stage: a grid that follows the room rather than a column count chosen in
   advance (`auto-fit` with a minimum tile width), so one other person gets the
   whole width and five share it.
+
+One cell may be **featured**, taking three quarters of the width with the rest
+in a rail: a composed program or a shared screen, both of which are only useful
+large, next to faces that stay readable small. A live screen share outranks the
+program, because the program is always there whereas somebody sharing is a
+thing that just happened.
 
 Both the stage and the tiles are sized to their container, not to the video.
 `max-width`/`max-height` caps an element at its *intrinsic* size, so a 720p
@@ -1206,7 +1234,7 @@ similarly for frame rate. The studio does not promise quality it cannot deliver.
 
 ## Testing strategy
 
-468 unit and integration tests (Vitest + React Testing Library) plus 42
+468 unit and integration tests (Vitest + React Testing Library) plus 45
 Playwright browser tests across eight scenarios.
 
 ```bash
@@ -1285,7 +1313,8 @@ including that a copied solo link really decodes the feed it names in a
 *different* window; **H** the guest-to-guest mesh — two guests sent nothing but
 a room link decode each other's video with no control room involved, a third
 joining an existing pair sees both, and the director's program really fills the
-stage rather than sitting at its own resolution in the middle of it.
+stage rather than sitting at its own resolution in the middle of it, and a
+guest's screen share replacing their camera and taking the featured cell.
 
 Scenario D is worth describing in full, because it exercises the parts that are
 easiest to fake. It asserts that the generated link's **fragment really contains
@@ -1403,29 +1432,30 @@ Reproduces the full production workflow in about three minutes.
    canvas; the status reads *Active* only once a live track exists.
 3. **Start microphone**. A mixer channel appears with a live meter — speak and
    watch it move.
-4. **Share screen** and pick any window. It is added as a source and letterboxed
-   to fit.
-5. In the Sources list, select **Screen** and use the properties panel's
-   **Fill** button to make it the background.
-6. Select **Camera**, then either drag it on the canvas or set `Width 320`,
+4. **Add a source → Background** and pick a colour. It fills the frame.
+5. Select **Camera**, then either drag it on the canvas or set `Width 320`,
    `X 920`, `Y 500` numerically — a picture-in-picture in the lower right.
    Drag to confirm snap guides latch to the edges and centre.
-7. Click **New scene** — it becomes the live scene immediately, since you
-   create a scene in order to build it. Rename it "Split", arrange camera and
-   screen side-by-side, and set its transition to **Crossfade, 400ms**.
-8. **Switch between the scenes.** Watch the program canvas actually dissolve —
+6. Click **New scene** — it becomes the live scene immediately, since you
+   create a scene in order to build it. Rename it "Split", arrange the camera
+   and the background side-by-side, and set its transition to
+   **Crossfade, 400ms**.
+
+   A screen share would arrive here as a *guest's* feed: the control room has
+   no screen capture of its own. See [Who can share a screen](#who-can-share-a-screen).
+7. **Switch between the scenes.** Watch the program canvas actually dissolve —
    the output changes, not just the highlighted card.
-9. In **Mix & record**, pull the host mic fader down. Each live audio source
+8. In **Mix & record**, pull the host mic fader down. Each live audio source
    has its own channel with a pre-fader meter.
-10. **Start recording**. The ON AIR tally lights and the timer runs.
-11. **Switch scenes while recording**, move the camera, hide a source, adjust a
+9. **Start recording**. The ON AIR tally lights and the timer runs.
+10. **Switch scenes while recording**, move the camera, hide a source, adjust a
     fader.
-12. **Stop & save**. Watch it pass through *Writing the file* before reporting
+11. **Stop & save**. Watch it pass through *Writing the file* before reporting
     *Saved to the library*.
-13. Open the **recording library**, **Preview** the result, and confirm the
+12. Open the **recording library**, **Preview** the result, and confirm the
     scene switches, the transforms, the hidden source and the fader moves are
     all in the file. Then **Download** it.
-14. Open **Diagnostics** to see real compositor frame rate, live track states
+13. Open **Diagnostics** to see real compositor frame rate, live track states
     and stream reference counts.
 
 ### The room workflow

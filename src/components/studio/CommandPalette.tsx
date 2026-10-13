@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { cn } from '@/lib/cn'
 import { useSceneManager } from '@/hooks/useSceneManager'
 import { useRecording } from '@/hooks/useRecording'
-import { useScreenShare } from '@/hooks/useScreenShare'
 import { useCamera } from '@/hooks/useCamera'
 import { useStudioStore } from '@/stores/studioStore'
 import { Dialog } from '@/components/shared/Dialog'
@@ -29,7 +28,6 @@ export function CommandPalette() {
 
   const scenes = useSceneManager()
   const recording = useRecording()
-  const screen = useScreenShare()
   const camera = useCamera()
 
   const room = useStudioStore((state) => state.session?.id ?? '')
@@ -45,12 +43,6 @@ export function CommandPalette() {
         label: recording.isRecording ? 'Stop recording' : 'Start recording',
         hint: 'Ctrl/Cmd + Shift + R',
         run: () => (recording.isRecording ? recording.stop() : void recording.start()),
-      },
-      {
-        id: 'screen',
-        label: screen.active ? 'Stop screen sharing' : 'Share screen',
-        hint: 'Ctrl/Cmd + Shift + S',
-        run: () => void screen.toggle(),
       },
       {
         id: 'camera',
@@ -99,7 +91,7 @@ export function CommandPalette() {
     }
 
     return list
-  }, [camera, openDialog, recording, room, scenes, screen, showToast])
+  }, [camera, openDialog, recording, room, scenes, showToast])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()

@@ -11,7 +11,6 @@ import {
   openSources,
   propertyField,
   recordingPanel,
-  shareScreen,
   sourceRows,
   startCamera,
 } from './fixtures'
@@ -24,13 +23,21 @@ import {
  */
 
 test.describe('Scenario B: source composition', () => {
-  test('composes a camera over a screen share', async ({ page }) => {
+  /**
+   * Two sources layered in one scene.
+   *
+   * A colour background stands in for what used to be a screen share here: the
+   * control room no longer captures a screen itself — that is a participant's
+   * job now — and the compositor behaviour under test is layering and
+   * transforms, which does not care what kind of source is underneath.
+   */
+  test('composes a camera over a background', async ({ page }) => {
     await openDirector(page)
-    await shareScreen(page)
+    await addBackground(page, '#2244aa')
     await startCamera(page)
 
     // Both sources exist in the scene.
-    await expect(sourceRows(page).filter({ hasText: 'Screen' })).toHaveCount(1)
+    await expect(sourceRows(page).filter({ hasText: 'Background' })).toHaveCount(1)
     await expect(sourceRows(page).filter({ hasText: 'Camera' })).toHaveCount(1)
     await expect.poll(() => canvasHasContent(page), { timeout: 20_000 }).toBe(true)
   })
