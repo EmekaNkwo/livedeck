@@ -53,9 +53,9 @@ export function Field({ label, srOnlyLabel, hint, error, className, children }: 
 }
 
 const inputClass =
-  'h-8 w-full rounded-md border border-deck-600 bg-deck-900 px-2 text-sm text-ink-100 ' +
+  'h-8 w-full rounded-sm border border-deck-600 bg-deck-950 px-2 text-sm text-ink-100 ' +
   'placeholder:text-ink-500 focus:border-accent-500 focus:outline-none ' +
-  'disabled:opacity-50 disabled:cursor-not-allowed'
+  'disabled:cursor-not-allowed disabled:opacity-50'
 
 /**
  * Keep an editable local draft that can diverge from the committed value.

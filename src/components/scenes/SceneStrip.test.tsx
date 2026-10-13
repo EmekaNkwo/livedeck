@@ -51,9 +51,39 @@ describe('SceneStrip', () => {
     useSceneStore.getState().createScene('Host')
 
     render(<SceneStrip />)
+    // Queried by accessible name, which stays descriptive even though the
+    // visible label is abbreviated to "New".
     await user.click(screen.getByRole('button', { name: /New scene/i }))
 
     expect(useSceneStore.getState().order).toHaveLength(2)
+  })
+
+  it('keeps the transition controls collapsed until asked for', async () => {
+    // They are set once per scene, while the vertical space they occupy is
+    // taken from the program output — which the operator watches constantly.
+    const user = userEvent.setup()
+    useSceneStore.getState().createScene('Host')
+
+    render(<SceneStrip />)
+    expect(screen.queryByLabelText(/Transition into this scene/i)).not.toBeInTheDocument()
+
+    const disclosure = screen.getByRole('button', { name: /Transition into this scene/i })
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(disclosure)
+    expect(screen.getByLabelText(/Transition into this scene/i)).toBeInTheDocument()
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('summarises the current transition on the collapsed disclosure', () => {
+    const scene = useSceneStore.getState().createScene('Host')
+    useSceneStore.getState().setTransition(scene.id, { type: 'crossfade', durationMs: 400 })
+
+    render(<SceneStrip />)
+    // Readable without expanding, so the space saving costs no information.
+    expect(
+      screen.getByRole('button', { name: /Transition into this scene/i }),
+    ).toHaveTextContent(/crossfade.*400ms/)
   })
 
   it('switches scenes with arrow keys for keyboard operation', async () => {
@@ -149,6 +179,8 @@ describe('SceneStrip', () => {
     const scene = useSceneStore.getState().createScene('Host')
 
     render(<SceneStrip />)
+    // Collapsed by default — open it before editing.
+    await user.click(screen.getByRole('button', { name: /Transition into this scene/i }))
 
     const typeSelect = screen.getByLabelText(/Transition into this scene/i)
     await user.selectOptions(typeSelect, 'crossfade')

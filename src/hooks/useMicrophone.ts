@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import type { MediaSource } from '@/types/source'
 import type { CaptureStatus } from '@/types/media'
 import { streamRegistry } from '@/services/media/stream-registry'
@@ -56,20 +56,25 @@ export function useMicrophone(): UseMicrophone {
   const upsertChannel = useAudioStore((state) => state.upsertChannel)
   const { addSource, replaceStream } = useMediaSources()
 
-  /**
-   * `track.enabled` is not observable, so it is mirrored into local state —
-   * but every read goes through the track first (see the effect below), so the
-   * mirror can never drift from reality.
-   */
-  const [trackMuted, setTrackMuted] = useState(false)
-
   const source = useMemo(() => {
     for (const id of order) {
       const candidate = sourceMap[id]
-      if (candidate?.type === 'microphone' && !candidate.simulated) return candidate
+      if (candidate?.type === 'microphone') return candidate
     }
     return null
   }, [order, sourceMap])
+
+  /**
+   * `track.enabled` is not observable, so it has to be mirrored.
+   *
+   * The mirror lives in the **store**, not in local state. Several components
+   * call this hook — the guest view's controls and the control-channel handler,
+   * for two — and a per-instance `useState` meant they disagreed: a remote mute
+   * disabled the track and updated one instance while another kept rendering
+   * "Mute". Every write reads the value back off the track first, so the shared
+   * mirror still cannot drift from the hardware.
+   */
+  const trackMuted = source?.muted ?? false
 
   const deviceId = source?.settings.kind === 'microphone' ? source.settings.deviceId : null
   const stream = source?.streamKey ? streamRegistry.getStream(source.streamKey) : null
@@ -99,7 +104,6 @@ export function useMicrophone(): UseMicrophone {
         const key = streamKeys.microphone(settledDeviceId)
         streamRegistry.register(key, mediaStream)
         setPermission('granted')
-        setTrackMuted(!audioTrack.enabled)
 
         if (source) {
           replaceStream(source.id, key)
@@ -192,7 +196,6 @@ export function useMicrophone(): UseMicrophone {
       }
       // Read back from the track rather than trusting the write.
       const actual = mediaStream.getAudioTracks().every((track) => !track.enabled)
-      setTrackMuted(actual)
       setMutedInStore(source.id, actual)
     },
     [setMutedInStore, source],
@@ -200,17 +203,19 @@ export function useMicrophone(): UseMicrophone {
 
   const toggleMuted = useCallback(() => setMuted(!trackMuted), [setMuted, trackMuted])
 
-  /** Resync the mirror whenever the underlying stream changes. */
+  /** Resync the shared mirror whenever the underlying stream changes. */
   useEffect(() => {
+    const sourceId = source?.id
+    if (!sourceId) return
     if (!source?.streamKey) {
-      setTrackMuted(false)
+      setMutedInStore(sourceId, false)
       return
     }
     const mediaStream = streamRegistry.getStream(source.streamKey)
     if (!mediaStream) return
     const tracks = mediaStream.getAudioTracks()
-    setTrackMuted(tracks.length > 0 && tracks.every((track) => !track.enabled))
-  }, [source?.streamKey])
+    setMutedInStore(sourceId, tracks.length > 0 && tracks.every((track) => !track.enabled))
+  }, [setMutedInStore, source?.id, source?.streamKey])
 
   useEffect(() => {
     return streamRegistry.onStreamEnded((key, reason) => {

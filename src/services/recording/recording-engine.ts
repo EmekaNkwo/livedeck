@@ -48,8 +48,6 @@ export type StartRecordingOptions = {
   /** Program audio from the mixer; null records video only. */
   audioStream: MediaStream | null
   frameRate: number
-  /** Forced failure from the demo panel's "recording failure" simulation. */
-  simulateFailure?: boolean
 }
 
 export class RecordingEngine {
@@ -102,19 +100,6 @@ export class RecordingEngine {
 
     this.setStatus('starting')
     const caps = detectCapabilities()
-
-    if (options.simulateFailure) {
-      // Injected by the demo panel. Routed through the real error path so the
-      // recoverable-error UI is exercised rather than mocked.
-      this.fail({
-        code: 'simulated',
-        message:
-          'Simulated recording failure (demo panel). The recorder was not started. Turn the simulation off and retry.',
-        recoverable: true,
-        at: Date.now(),
-      })
-      return false
-    }
 
     if (!caps.mediaRecorder) {
       this.fail({

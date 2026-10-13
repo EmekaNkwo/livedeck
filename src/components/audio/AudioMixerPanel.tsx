@@ -5,12 +5,11 @@ import { cn } from '@/lib/cn'
 import { PROGRAM_METER_ID } from '@/services/audio/meter-bus'
 import { useAudioMixer } from '@/hooks/useAudioMixer'
 import { useAudioStore } from '@/stores/audioStore'
-import { useSourceStore } from '@/stores/sourceStore'
 import { useStudioStore } from '@/stores/studioStore'
 import { Button } from '@/components/shared/Button'
 import { Panel } from '@/components/shared/Panel'
 import { SliderField } from '@/components/shared/Field'
-import { EmptyState, Notice, SimulatedBadge } from '@/components/shared/Status'
+import { EmptyState, Notice } from '@/components/shared/Status'
 import { formatPercent } from '@/utils/format'
 import { LevelMeter } from './LevelMeter'
 
@@ -106,13 +105,11 @@ function ChannelStrip({
   channel: AudioChannelConfig
   mixer: ReturnType<typeof useAudioMixer>
 }) {
-  const source = useSourceStore((state) => state.sources[channel.sourceId])
-  const simulated = source?.simulated ?? false
 
   return (
     <div
       className={cn(
-        'flex flex-col gap-1.5 rounded-md border px-2 py-2',
+        'flex flex-col gap-1.5 border px-2 py-2',
         channel.mutedInMix ? 'border-live-500/40 bg-live-500/5' : 'border-deck-700 bg-deck-800',
       )}
     >
@@ -120,7 +117,6 @@ function ChannelStrip({
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-100">
           {channel.label}
         </span>
-        {simulated ? <SimulatedBadge /> : null}
 
         <Button
           variant="ghost"

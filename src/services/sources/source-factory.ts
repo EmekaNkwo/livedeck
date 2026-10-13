@@ -27,6 +27,15 @@ export type PlacementContext = {
   existingLayers: number[]
 }
 
+/**
+ * The aspect to assume for a video source whose real size is not known yet.
+ *
+ * 16:9 is what every webcam and every `getUserMedia` default produces, and a
+ * source placed on this assumption is corrected by the compositor's own
+ * letterboxing once the first frame decodes.
+ */
+const ASSUMED_VIDEO_SIZE: Size = { width: 16, height: 9 }
+
 export function defaultTransform(type: SourceType, context: PlacementContext): SourceTransform {
   const rect = defaultRect(type, context)
   return { ...rect, rotation: 0 }
@@ -48,9 +57,25 @@ function defaultRect(type: SourceType, context: PlacementContext): NormalizedRec
       // Picture-in-picture, bottom-right, with a small margin. Each additional
       // camera-like source steps left so they do not stack invisibly.
       const width = 0.28
-      const base = context.intrinsic
-        ? fitRect(context.intrinsic, context.canvasAspect, width)
-        : centerRect(width, width * 0.5625)
+      /*
+       * The fallback goes through `fitRect` too, rather than computing a
+       * height directly.
+       *
+       * Normalized space is a unit square while the canvas is not, so
+       * `width * 0.5625` is not a 16:9 box — on a 16:9 canvas it is 3.2:1,
+       * which is what made an arriving guest feed a stretched letterbox slot.
+       * A 16:9 box on a 16:9 canvas is a *square* in normalized units, and
+       * `fitRect` is the function that already knows that.
+       *
+       * This path is the common one for a guest: a remote track's intrinsic
+       * size is not known until its first frame decodes, well after the
+       * source is placed.
+       */
+      const base = fitRect(
+        context.intrinsic ?? ASSUMED_VIDEO_SIZE,
+        context.canvasAspect,
+        width,
+      )
       const margin = 0.04
       const step = (context.existingCount % 3) * (base.width + margin * 0.5)
       return {

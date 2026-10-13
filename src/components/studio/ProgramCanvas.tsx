@@ -2,6 +2,7 @@ import { Crop, Grid3x3, Maximize2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { cn } from '@/lib/cn'
 import { useCanvasInteraction } from '@/hooks/useCanvasInteraction'
+import { useFittedBox } from '@/hooks/useFittedBox'
 import { useProgramCompositor } from '@/hooks/useProgramCompositor'
 import { useSceneStore } from '@/stores/sceneStore'
 import { useSourceStore } from '@/stores/sourceStore'
@@ -31,6 +32,16 @@ export function ProgramCanvas() {
   const { canvasRef, canvasSize, canvasAspect } = useProgramCompositor()
   const interaction = useCanvasInteraction()
   const [cropMode, setCropMode] = useState(false)
+
+  /*
+   * The displayed box is measured, not derived in CSS.
+   *
+   * It has to be exactly the size of the painted video, because the editor
+   * overlay is positioned against it — a box that merely *contains* a
+   * letterboxed canvas would put the selection handles beside the picture
+   * instead of on it. See useFittedBox.
+   */
+  const viewport = useFittedBox(canvasAspect)
 
   const activeSceneId = useSceneStore((state) => state.activeSceneId)
   const scenes = useSceneStore((state) => state.scenes)
@@ -71,10 +82,15 @@ export function ProgramCanvas() {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
       {/* Canvas viewport. aspect-ratio keeps the logical frame intact while the
           surrounding layout flexes. */}
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-panel border border-deck-700 bg-canvas-void p-2">
+      <div
+        ref={viewport.containerRef}
+        className="flex min-h-0 flex-1 items-center justify-center overflow-hidden border border-deck-700 bg-canvas-void p-1"
+      >
         <div
-          className="relative max-h-full max-w-full"
-          style={{ aspectRatio: String(canvasAspect), width: '100%' }}
+          // `shrink-0`: the computed size is authoritative. Letting flexbox
+          // shrink it would skew the aspect ratio and letterbox the canvas.
+          className="relative shrink-0"
+          style={{ width: `${viewport.box.width}px`, height: `${viewport.box.height}px` }}
         >
           <div className="relative h-full w-full">
             <canvas
@@ -95,7 +111,7 @@ export function ProgramCanvas() {
                   ? `Program output. Scene: ${activeScene.name}. ${items.filter((item) => item.visible).length} visible sources.`
                   : 'Program output. No scene selected.'
               }
-              className="block h-full w-full rounded-sm bg-deck-950 object-contain"
+              className="block h-full w-full bg-deck-950 object-contain"
             />
 
             {/* Interactive layer. Sits exactly over the canvas, so overlay
@@ -123,7 +139,7 @@ export function ProgramCanvas() {
             {/* On-air indicator, over the canvas but outside the recorded
                 pixels. Pulses, but also always carries the word. */}
             {recording || paused ? (
-              <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-2 rounded-md bg-deck-950/85 px-2 py-1">
+              <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-2 bg-deck-950/85 px-2 py-1">
                 <span
                   className={cn(
                     'h-2 w-2 rounded-full',

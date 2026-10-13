@@ -36,6 +36,27 @@ export type StudioSettings = {
   /** Route mixer output to local speakers. Off by default (feedback risk). */
   monitorProgramAudio: boolean
   iceServerUrls: string[]
+
+  /**
+   * Which signaling transport to use.
+   *
+   * `server` is the default: guests join by opening the room link and appear
+   * automatically, which is the workflow people expect from a meeting tool, and
+   * it enables trickle ICE. It requires the relay in `server/` to be running.
+   *
+   * `manual` remains fully supported as the zero-infrastructure fallback —
+   * connection details travel inside the invite link's fragment and the guest's
+   * answer comes back by hand. See README › Signaling transports.
+   */
+  signalingTransport: 'manual' | 'server'
+  /**
+   * Base URL of the relay. Only used when `signalingTransport` is `server`.
+   *
+   * Blank means "work it out" — see `services/signaling/relay-url.ts`. It is
+   * left blank by default rather than hardcoded so that a studio deployed
+   * behind a proxy resolves to its own origin instead of someone's localhost.
+   */
+  signalingServerUrl: string
 }
 
 export const DEFAULT_SETTINGS: StudioSettings = {
@@ -47,21 +68,9 @@ export const DEFAULT_SETTINGS: StudioSettings = {
   previewFrameRate: 30,
   monitorProgramAudio: false,
   iceServerUrls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
+  // Rooms by default: a guest opens the room link and appears, with no code to
+  // carry back. Manual is one setting away for installs with no relay.
+  signalingTransport: 'server',
+  signalingServerUrl: '',
 }
 
-/** Which injected failure paths the demo panel has switched on. */
-export type SimulationFlags = {
-  cameraInterruption: boolean
-  guestDisconnect: boolean
-  poorConnection: boolean
-  recordingFailure: boolean
-  sourceUnavailable: boolean
-}
-
-export const NO_SIMULATIONS: SimulationFlags = {
-  cameraInterruption: false,
-  guestDisconnect: false,
-  poorConnection: false,
-  recordingFailure: false,
-  sourceUnavailable: false,
-}

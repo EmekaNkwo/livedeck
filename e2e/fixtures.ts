@@ -1,4 +1,4 @@
-import { type Page, expect } from '@playwright/test'
+import { type BrowserContext, type Page, expect } from '@playwright/test'
 
 /**
  * Shared helpers for the browser tests.
@@ -9,16 +9,82 @@ import { type Page, expect } from '@playwright/test'
  * media pipeline works and proving the UI changed colour.
  */
 
-export async function createSession(page: Page, name = 'E2E production'): Promise<void> {
+/**
+ * Force a signaling transport before the app boots.
+ *
+ * The studio defaults to room-based signaling, which needs the relay. Tests
+ * that exercise the manual invite-link flow have to say so explicitly — seeding
+ * the persisted setting is how, because the choice is read during the first
+ * render and switching it through the UI afterwards would tear down and rebuild
+ * the adapter mid-test.
+ *
+ * The shape here is zustand's persist envelope; `version: 2` keeps the store's
+ * own v1→v2 migration (which moves old installs to rooms) from undoing this.
+ */
+export async function useSignalingTransport(
+  target: Page | BrowserContext,
+  transport: 'manual' | 'server',
+): Promise<void> {
+  await target.addInitScript(
+    ([key, value, url]) => {
+      window.localStorage.setItem(
+        key as string,
+        JSON.stringify({
+          state: { settings: { signalingTransport: value, signalingServerUrl: url } },
+          version: 2,
+        }),
+      )
+    },
+    ['livedeck:v1:settings', transport, RELAY_URL],
+  )
+}
+
+/**
+ * Where the relay under test listens.
+ *
+ * Pinned explicitly rather than left to the app's own resolution, because 3001
+ * is a popular port and a *different* process answering it fails in the most
+ * confusing way available: TCP connects, the WebSocket upgrade is never
+ * answered, and the transport sits in `connecting` forever. Overriding both
+ * this and `PORT` for the relay moves the whole test out of the way.
+ *
+ *     LIVEDECK_RELAY_PORT=3100 npm run e2e
+ */
+export const RELAY_PORT = process.env.LIVEDECK_RELAY_PORT ?? '3001'
+export const RELAY_URL = `ws://localhost:${RELAY_PORT}`
+
+/**
+ * Open the director control room for a room.
+ *
+ * Rooms are addressed by name, so navigating to `/director/<room>` creates it.
+ * Goes via the landing page's role card so the entry flow is exercised too.
+ */
+export async function openDirector(page: Page, room = 'e2e-room'): Promise<void> {
   await page.goto('/')
-  await page.getByLabel('Session name').fill(name)
-  await page.getByRole('button', { name: 'Create session' }).click()
-  await expect(page).toHaveURL(/\/studio\//)
-  // The compositor attaches its canvas once the shell mounts.
+  await page.getByLabel('Room name').fill(room)
+  await page.getByRole('button', { name: /Open director/i }).click()
+  await expect(page).toHaveURL(new RegExp(`/director/${room}`))
+  // The compositor attaches its canvas once the room mounts.
   await expect(page.locator('canvas').first()).toBeVisible()
 }
 
+/** Navigate straight to a role URL, as a shared link would. */
+export async function openRole(
+  page: Page,
+  role: 'director' | 'push' | 'scene',
+  room: string,
+  query = '',
+): Promise<void> {
+  await page.goto(`/${role}/${room}${query}`)
+}
+
+/** Switch the control room to one of its tabs. */
+export async function openTab(page: Page, label: string | RegExp): Promise<void> {
+  await page.getByRole('tab', { name: label }).click()
+}
+
 export async function startCamera(page: Page): Promise<void> {
+  await openTab(page, /Sources/)
   await page.getByRole('button', { name: /Start camera/i }).click()
   // "Active" only appears once a live video track exists.
   await expect(
@@ -27,6 +93,7 @@ export async function startCamera(page: Page): Promise<void> {
 }
 
 export async function startMicrophone(page: Page): Promise<void> {
+  await openTab(page, /Sources/)
   await page.getByRole('button', { name: /Start microphone/i }).click()
   await expect(
     page.getByRole('region', { name: 'Microphone' }).getByText('Active', { exact: true }),
@@ -34,6 +101,7 @@ export async function startMicrophone(page: Page): Promise<void> {
 }
 
 export async function shareScreen(page: Page): Promise<void> {
+  await openTab(page, /Sources/)
   await page.getByRole('button', { name: /Share screen/i }).click()
   await expect(
     page.getByRole('region', { name: 'Screen sharing' }).getByText('Active', { exact: true }),
@@ -76,6 +144,7 @@ export async function canvasHasContent(page: Page): Promise<boolean> {
  * the region to be attached before deciding whether to click the disclosure.
  */
 export async function openDiagnostics(page: Page): Promise<void> {
+  await openTab(page, /Diagnostics/)
   const panel = page.getByRole('region', { name: 'Diagnostics' })
   await expect(panel).toBeAttached({ timeout: 20_000 })
 
@@ -95,6 +164,7 @@ export function addSourceDialog(page: Page) {
 
 /** Add a colour background with a specific colour. */
 export async function addBackground(page: Page, color: string): Promise<void> {
+  await openTab(page, /Sources/)
   await page.getByRole('button', { name: 'Add a source' }).click()
   const dialog = addSourceDialog(page)
   await dialog.getByLabel('Colour', { exact: true }).fill(color)
@@ -122,6 +192,34 @@ export function sourceRows(page: Page) {
 }
 
 /**
+ * Scene tabs only.
+ *
+ * Scoped to the Scenes tablist: the control room's own panel switcher is also
+ * a tablist, so an unscoped `getByRole('tab')` matches both.
+ */
+export function sceneTabs(page: Page) {
+  return page.getByRole('tablist', { name: 'Scenes' }).getByRole('tab')
+}
+
+/** Open the Mix & record tab and return the Recording region. */
+export async function recordingPanel(page: Page) {
+  await openTab(page, /Mix & record/)
+  const panel = page.getByRole('region', { name: 'Recording' })
+  await expect(panel).toBeVisible()
+  return panel
+}
+
+/** Open the Sources tab, where capture controls and the source list live. */
+export async function openSources(page: Page): Promise<void> {
+  await openTab(page, /Sources/)
+}
+
+/** Guest tiles in the control room. */
+export function guestTiles(page: Page) {
+  return page.getByRole('listitem').filter({ has: page.getByRole('button', { name: /^Remove / }) })
+}
+
+/**
  * A numeric field in the properties panel.
  *
  * `exact` is required: `getByLabel` is a case-insensitive substring match by
@@ -129,6 +227,17 @@ export function sourceRows(page: Page) {
  */
 export function propertyField(page: Page, label: string) {
   return page.getByRole('region', { name: 'Properties' }).getByLabel(label, { exact: true })
+}
+
+/** Open the Scenes tab, where the properties panel lives. */
+export async function openProperties(page: Page): Promise<void> {
+  await openTab(page, /Scenes/)
+  await expect(page.getByRole('region', { name: 'Properties' })).toBeAttached()
+}
+
+/** Open the Mix & record tab. */
+export async function openMix(page: Page): Promise<void> {
+  await openTab(page, /Mix & record/)
 }
 
 /** Wait until the compositor reports it is drawing frames. */

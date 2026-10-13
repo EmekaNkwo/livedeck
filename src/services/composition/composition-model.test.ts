@@ -28,7 +28,6 @@ function source(id: string, type: SourceType = 'camera'): MediaSource {
           : { kind: 'color-background', color: '#000' },
     streamKey: null,
     volume: 1,
-    simulated: false,
     createdAt: 0,
   }
 }

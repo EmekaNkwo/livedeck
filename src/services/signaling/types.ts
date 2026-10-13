@@ -14,7 +14,7 @@ import type { SignalEnvelope } from '@/types/peer'
  * browsers, and presenting one as if it could would be a lie.
  */
 
-export type SignalingTransportId = 'manual' | 'broadcast-channel' | 'external'
+export type SignalingTransportId = 'manual' | 'websocket' | 'broadcast-channel' | 'external'
 
 export type SignalingCapabilities = {
   id: SignalingTransportId
@@ -23,6 +23,20 @@ export type SignalingCapabilities = {
   crossDevice: boolean
   /** True when the user must move payloads by hand. */
   requiresManualExchange: boolean
+  /**
+   * True when peers find each other by room name, with no exchange step.
+   * Implies a server.
+   */
+  supportsRooms: boolean
+  /**
+   * True when ICE candidates can be relayed one at a time.
+   *
+   * This is the difference between vanilla ICE (gather everything, then send
+   * one big blob) and trickle ICE (send as you go). Trickle connects
+   * noticeably faster, but it needs a live channel — a copied link has nowhere
+   * to put a candidate that arrives a second later.
+   */
+  supportsTrickleIce: boolean
   description: string
 }
 
@@ -32,6 +46,37 @@ export type SignalingEvents = {
   /** An answer arrived for an offer we sent. */
   onAnswer: (envelope: SignalEnvelope) => void
   onError: (message: string) => void
+
+  /* ---- room transports only; manual adapters never emit these ---- */
+
+  /** A trickled ICE candidate arrived for an in-flight connection. */
+  onRemoteCandidate?: (peerId: string, candidate: RTCIceCandidateInit) => void
+  /** Somebody entered the room and can be offered a connection. */
+  onPeerAvailable?: (peer: RoomPeerInfo) => void
+  /** Somebody left the room, or their socket dropped. */
+  onPeerGone?: (peerId: string) => void
+  /** The transport's own connection state changed. */
+  onTransportState?: (state: TransportState) => void
+}
+
+export type RoomPeerInfo = {
+  peerId: string
+  role: 'director' | 'guest'
+  label: string
+}
+
+export type TransportState =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'failed'
+  | 'closed'
+
+export type JoinRoomOptions = {
+  room: string
+  role: 'director' | 'guest'
+  label: string
 }
 
 export interface SignalingAdapter {
@@ -49,6 +94,28 @@ export interface SignalingAdapter {
   ingest(raw: string): Promise<void>
 
   disconnect(): void
+
+  /* ---- optional, for transports that support rooms ---- */
+
+  /**
+   * Enter a room so peers can find each other by name.
+   * Absent on the manual adapter, which has no server to join through.
+   */
+  joinRoom?(options: JoinRoomOptions): Promise<void>
+  /**
+   * Leave the current room without tearing down the transport.
+   *
+   * A no-op on transports with no rooms. Worth having rather than relying on
+   * the socket closing: a guest who leaves should disappear from the control
+   * room immediately, not when their browser tab eventually goes away.
+   */
+  leaveRoom?(): Promise<void>
+
+  /** Send a trickled ICE candidate to a specific peer. */
+  sendCandidate?(peerId: string, candidate: RTCIceCandidateInit): void
+
+  /** This connection's server-assigned id, once joined. */
+  localPeerId?(): string | null
 }
 
 /** Validation result for a pasted signaling payload. */

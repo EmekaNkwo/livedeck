@@ -34,6 +34,27 @@ export const createPeerId = () => createId('peer')
 export const createRecordingId = () => createId('rec')
 export const createSessionId = () => shortId(6)
 
+/**
+ * A room code in the `abc-defg-hij` shape meeting tools use.
+ *
+ * Grouped in threes because that is what makes a code readable aloud over a
+ * phone and typeable from memory, and letters only because a code containing
+ * `0`/`o` or `1`/`l` gets mistyped. Rooms are addressed by this string, so it
+ * has to survive being dictated.
+ *
+ * This is a convenience label, **not** a credential — anyone holding it can
+ * join the room. 10 letters is roughly 47 bits, which makes it impractical to
+ * guess, but that is obscurity, not access control.
+ */
+export function createRoomCode(): string {
+  const letters = 'abcdefghijkmnpqrstuvwxyz'
+  const bytes = randomBytes(10)
+  const pick = (index: number) => letters[(bytes[index] ?? 0) % letters.length] ?? 'x'
+  const group = (start: number, length: number) =>
+    Array.from({ length }, (_, offset) => pick(start + offset)).join('')
+  return `${group(0, 3)}-${group(3, 4)}-${group(7, 3)}`
+}
+
 /** Make `name` unique within `existing` by appending a numeric suffix. */
 export function uniqueName(name: string, existing: readonly string[]): string {
   if (!existing.includes(name)) return name

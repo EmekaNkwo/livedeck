@@ -22,7 +22,7 @@ export {
   ASPECT_RATIOS,
   RESOLUTION_SHORT_EDGE,
 } from './scene'
-export { DEFAULT_SETTINGS, NO_SIMULATIONS } from './session'
+export { DEFAULT_SETTINGS } from './session'
 export { PEER_STATUS_LABEL } from './peer'
 export {
   SILENT_LEVEL,

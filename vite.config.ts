@@ -8,6 +8,9 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
+      // Code compiled by both the browser client and the signaling server.
+      // One definition of the wire protocol, so the two cannot drift.
+      '@shared': fileURLToPath(new URL('./shared', import.meta.url)),
     },
   },
   server: {

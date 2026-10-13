@@ -4,7 +4,6 @@ import { useSceneManager } from '@/hooks/useSceneManager'
 import { useRecording } from '@/hooks/useRecording'
 import { useScreenShare } from '@/hooks/useScreenShare'
 import { useCamera } from '@/hooks/useCamera'
-import { useGuests } from '@/hooks/useGuests'
 import { useStudioStore } from '@/stores/studioStore'
 import { Dialog } from '@/components/shared/Dialog'
 
@@ -32,7 +31,9 @@ export function CommandPalette() {
   const recording = useRecording()
   const screen = useScreenShare()
   const camera = useCamera()
-  const guests = useGuests()
+
+  const room = useStudioStore((state) => state.session?.id ?? '')
+  const showToast = useStudioStore((state) => state.showToast)
 
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
@@ -58,16 +59,28 @@ export function CommandPalette() {
       },
       { id: 'new-scene', label: 'Create a scene', run: () => scenes.createScene() },
       {
-        id: 'demo-guest',
-        label: 'Add a simulated guest',
-        hint: 'Local demo feed',
-        run: () => guests.addSimulatedGuest(),
+        id: 'scene-link',
+        label: 'Copy the scene output link',
+        hint: 'For OBS capture',
+        run: () => {
+          const url = `${window.location.origin}/scene/${room}`
+          void navigator.clipboard
+            ?.writeText(url)
+            .then(() => showToast('Scene output link copied.', 'success'))
+            .catch(() =>
+              showToast('Clipboard access was refused — copy the link from the Scenes tab.', 'error'),
+            )
+        },
       },
       {
-        id: 'invite',
-        label: 'Connect a real guest',
-        hint: 'Manual signaling',
-        run: () => openDialog('invite'),
+        id: 'open-scene',
+        label: 'Open the scene output in a new window',
+        run: () =>
+          window.open(
+            `${window.location.origin}/scene/${room}`,
+            '_blank',
+            'noopener,width=1280,height=720',
+          ),
       },
       { id: 'recordings', label: 'Open the recording library', run: () => openDialog('recordings') },
       { id: 'settings', label: 'Open settings', run: () => openDialog('settings') },
@@ -86,7 +99,7 @@ export function CommandPalette() {
     }
 
     return list
-  }, [camera, guests, openDialog, recording, scenes, screen])
+  }, [camera, openDialog, recording, room, scenes, screen, showToast])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()

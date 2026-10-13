@@ -21,7 +21,6 @@ export type CreateSourceInput = {
   type: SourceType
   settings: SourceSettings
   streamKey?: string | null
-  simulated?: boolean
   volume?: number
   muted?: boolean
 }
@@ -69,7 +68,6 @@ export const useSourceStore = create<SourceState>()((set, get) => ({
       settings: input.settings,
       streamKey: input.streamKey ?? null,
       volume: input.volume ?? 1,
-      simulated: input.simulated ?? false,
       createdAt: Date.now(),
     }
     set((state) => ({

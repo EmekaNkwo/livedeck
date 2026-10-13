@@ -4,10 +4,14 @@ import {
   addSourceDialog,
   canvasHasContent,
   canvasSize,
-  createSession,
   onAirTally,
   openDiagnostics,
+  openDirector,
+  openProperties,
+  openSources,
   propertyField,
+  recordingPanel,
+  sceneTabs,
   sourceRows,
   startCamera,
   startMicrophone,
@@ -23,7 +27,7 @@ import {
 
 test.describe('Scenario A: local studio', () => {
   test('creates a session and starts the compositor', async ({ page }) => {
-    await createSession(page, 'Scenario A')
+    await openDirector(page)
 
     // The logical output is independent of the window: 16:9 at 720p.
     expect(await canvasSize(page)).toEqual({ width: 1280, height: 720 })
@@ -31,7 +35,7 @@ test.describe('Scenario A: local studio', () => {
   })
 
   test('acquires a camera and composites it into the program output', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
     await startCamera(page)
 
     // A camera source appears in the library and in the scene.
@@ -42,9 +46,10 @@ test.describe('Scenario A: local studio', () => {
   })
 
   test('acquires a microphone and creates a real mixer channel', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
     await startMicrophone(page)
 
+    await page.getByRole('tab', { name: /Mix & record/ }).click()
     const mixer = page.getByRole('region', { name: 'Audio mixer' })
     await expect(mixer.getByText(/Host Mic/i)).toBeVisible()
 
@@ -58,8 +63,9 @@ test.describe('Scenario A: local studio', () => {
   })
 
   test('adds a colour background and a text source', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
 
+    await openSources(page)
     await page.getByRole('button', { name: 'Add a source' }).click()
     await addSourceDialog(page).getByRole('button', { name: /Add background/i }).click()
     await expect(sourceRows(page).filter({ hasText: 'Background' })).toHaveCount(1)
@@ -73,11 +79,13 @@ test.describe('Scenario A: local studio', () => {
   })
 
   test('arranges a source numerically and the output follows', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
+    await openSources(page)
     await page.getByRole('button', { name: 'Add a source' }).click()
     await addSourceDialog(page).getByRole('button', { name: /Add background/i }).click()
 
     // Numeric editing is the accessible path and must drive the real transform.
+    await openProperties(page)
     await propertyField(page, 'X').fill('200')
     await propertyField(page, 'Width').fill('400')
 
@@ -86,7 +94,7 @@ test.describe('Scenario A: local studio', () => {
   })
 
   test('creates scenes and switching changes the program output', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
 
     // Scene 1: a dark background.
     await addBackground(page, '#111111')
@@ -95,7 +103,7 @@ test.describe('Scenario A: local studio', () => {
     await page.getByRole('button', { name: /New scene/i }).click()
     await addBackground(page, '#f0f0f0')
 
-    const tabs = page.getByRole('tab')
+    const tabs = sceneTabs(page)
     await expect(tabs).toHaveCount(2)
 
     // Switch to the bright scene and confirm the canvas actually changed.
@@ -109,12 +117,12 @@ test.describe('Scenario A: local studio', () => {
   })
 
   test('records the program output, then previews and offers a download', async ({ page }) => {
-    await createSession(page, 'Recording run')
+    await openDirector(page)
     await startCamera(page)
     await startMicrophone(page)
     await expect.poll(() => canvasHasContent(page), { timeout: 20_000 }).toBe(true)
 
-    const recording = page.getByRole('region', { name: 'Recording' })
+    const recording = await recordingPanel(page)
     await recording.getByRole('button', { name: /Start recording/i }).click()
 
     // On air is driven by the recorder's real status.

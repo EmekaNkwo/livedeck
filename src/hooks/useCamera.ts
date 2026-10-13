@@ -11,7 +11,6 @@ import { streamKeys } from '@/services/sources/source-factory'
 import { toMediaError } from '@/utils/errors'
 import { useSourceStore } from '@/stores/sourceStore'
 import { useStudioStore } from '@/stores/studioStore'
-import { useSimulationStore } from '@/stores/simulationStore'
 import { useMediaSources } from './useMediaSources'
 
 /**
@@ -60,8 +59,6 @@ export function useCamera(): UseCamera {
   const setCameraPermission = useStudioStore((state) => state.setCameraPermission)
   const showToast = useStudioStore((state) => state.showToast)
 
-  const cameraInterruption = useSimulationStore((state) => state.flags.cameraInterruption)
-  const logSimulation = useSimulationStore((state) => state.logEvent)
 
   const { addSource, replaceStream } = useMediaSources()
 
@@ -73,7 +70,7 @@ export function useCamera(): UseCamera {
   const source = useMemo(() => {
     for (const id of order) {
       const candidate = sourceMap[id]
-      if (candidate?.type === 'camera' && !candidate.simulated) return candidate
+      if (candidate?.type === 'camera') return candidate
     }
     return null
   }, [order, sourceMap])
@@ -272,27 +269,6 @@ export function useCamera(): UseCamera {
       }
     })
   }, [setMediaError, setStatus, setStreamKey, source?.id])
-
-  /**
-   * Demo panel: "camera interruption". Drives the real teardown path so the
-   * unavailable state and its recovery controls are genuinely exercised.
-   */
-  useEffect(() => {
-    if (!cameraInterruption) return
-    if (!source?.streamKey) return
-    const key = source.streamKey
-    logSimulation('Camera interruption injected — track torn down')
-    setStreamKey(source.id, null)
-    streamRegistry.dispose(key, 'ended')
-    setStatus('unavailable')
-    setMediaError({
-      code: 'not-readable',
-      message:
-        'Camera interrupted (simulated from the demo panel). Turn the simulation off and retry.',
-      technical: null,
-      at: Date.now(),
-    })
-  }, [cameraInterruption, logSimulation, setMediaError, setStatus, setStreamKey, source])
 
   return {
     source,

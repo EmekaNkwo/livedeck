@@ -69,7 +69,7 @@ export function useScreenShare(): UseScreenShare {
   const source = useMemo(() => {
     for (const id of order) {
       const candidate = sourceMap[id]
-      if (candidate?.type === 'screen' && !candidate.simulated) return candidate
+      if (candidate?.type === 'screen') return candidate
     }
     return null
   }, [order, sourceMap])

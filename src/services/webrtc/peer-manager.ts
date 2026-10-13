@@ -1,8 +1,15 @@
 import type { PeerRole, PeerState, PeerStats, PeerStatus, SignalEnvelope } from '@/types/peer'
+import type {
+  AnyChannelMessage,
+  ControlChannelState,
+  ControlMessage,
+  GuestMessage,
+} from '@/types/room'
 import { detectCapabilities } from '@/lib/capabilities'
 import { createPeerId } from '@/utils/id'
 import type { GatheringOutcome } from './ice'
 import { buildPeerConfiguration, describeConnectivity, waitForIceGathering } from './ice'
+import { CONTROL_CHANNEL_LABEL, ControlChannel } from './control-channel'
 import { collectStats } from './stats'
 
 /**
@@ -24,11 +31,25 @@ import { collectStats } from './stats'
 
 export type PeerManagerEvents = {
   onStateChange: (state: PeerState) => void
+  /**
+   * A locally-discovered ICE candidate, for transports that can trickle.
+   *
+   * Only emitted when `trickle` is enabled; the manual path waits for
+   * gathering to finish instead, because a copied link has nowhere to deliver
+   * a candidate that turns up later.
+   */
+  onLocalCandidate: (peerId: string, candidate: RTCIceCandidateInit) => void
   /** A remote track arrived; the stream is ready to show and to mix. */
   onRemoteStream: (peerId: string, stream: MediaStream) => void
   onRemoteStreamEnded: (peerId: string) => void
   onLocalDescriptionReady: (envelope: SignalEnvelope, outcome: GatheringOutcome) => void
   onStats: (peerId: string, stats: PeerStats) => void
+  /** The control channel opened, closed, or reported new latency/track state. */
+  onControlState: (state: ControlChannelState) => void
+  /** A director command arrived — only ever handled by a guest. */
+  onControlMessage: (peerId: string, message: ControlMessage) => void
+  /** A guest reported its own state — only ever handled by the director. */
+  onGuestMessage: (peerId: string, message: GuestMessage) => void
 }
 
 type Peer = {
@@ -39,13 +60,52 @@ type Peer = {
   remoteStream: MediaStream | null
   statsTimer: ReturnType<typeof setInterval> | null
   previousStatsSample: Parameters<typeof collectStats>[1]
+  /** Director ↔ guest command path, alongside the media. */
+  control: ControlChannel
+  /** True once `setRemoteDescription` has succeeded. */
+  hasRemoteDescription: boolean
+  /** Candidates that arrived before the remote description was applied. */
+  pendingCandidates: RTCIceCandidateInit[]
 }
 
 const STATS_INTERVAL_MS = 1000
 
+/**
+ * How many candidates to hold for a peer that does not exist yet.
+ *
+ * Generous relative to a real candidate set (a handful on a LAN, a few dozen
+ * with several interfaces and a TURN server) but bounded, so a peer id that
+ * never materializes cannot grow the buffer indefinitely.
+ */
+const MAX_EARLY_CANDIDATES = 64
+
+/**
+ * Statuses that describe progress *toward* a connection rather than its
+ * outcome. They are only ever correct while the connection is still
+ * undecided — see {@link PeerConnectionManager.setStatus}.
+ */
+const PROGRESS_STATUSES: ReadonlySet<PeerStatus> = new Set<PeerStatus>([
+  'initializing',
+  'waiting-for-answer',
+  'connecting',
+])
+
+/**
+ * True once `RTCPeerConnection` has decided.
+ *
+ * `disconnected` is deliberately absent: ICE often recovers from it, so it is
+ * a transient state the studio reports as *reconnecting*, not a verdict.
+ */
+function isSettledConnection(state: RTCPeerConnectionState | null): boolean {
+  return state === 'connected' || state === 'failed' || state === 'closed'
+}
+
 export class PeerConnectionManager {
   private readonly peers = new Map<string, Peer>()
+  /** remote peerId -> candidates that arrived before the peer was created. */
+  private readonly earlyCandidates = new Map<string, RTCIceCandidateInit[]>()
   private events: Partial<PeerManagerEvents> = {}
+  private trickle = false
   private iceServerUrls: string[] = []
   private sessionId = ''
   private localLabel = 'Host'
@@ -56,12 +116,82 @@ export class PeerConnectionManager {
     iceServerUrls: string[]
     sessionId: string
     localLabel: string
+    /**
+     * Emit candidates as they are found rather than waiting for gathering.
+     * Requires a live signaling channel; see `SignalingCapabilities`.
+     */
+    trickle?: boolean
     events: Partial<PeerManagerEvents>
   }): void {
     this.iceServerUrls = options.iceServerUrls
     this.sessionId = options.sessionId
     this.localLabel = options.localLabel
+    this.trickle = options.trickle ?? false
     this.events = options.events
+  }
+
+  /**
+   * Apply a trickled candidate from the remote side.
+   *
+   * Candidates race the handshake in two distinct ways, and both have to be
+   * buffered or a connection path is silently lost:
+   *
+   *  1. The peer exists but has no remote description yet. Adding a candidate
+   *     then throws `InvalidStateError`, so they queue on the peer.
+   *  2. **The peer does not exist yet at all.** The offerer sends its
+   *     description and its first candidates back-to-back, so on a fast link
+   *     candidates can arrive while the answerer is still inside
+   *     `acceptOffer`. Dropping those was a real intermittent failure: on a
+   *     LAN there may be only one or two candidates, so losing them leaves the
+   *     connection stuck in `connecting` until it fails outright.
+   */
+  async addRemoteCandidate(peerId: string, candidate: RTCIceCandidateInit): Promise<void> {
+    const peer = this.peers.get(peerId)
+    if (!peer) {
+      this.bufferEarlyCandidate(peerId, candidate)
+      return
+    }
+
+    if (!peer.hasRemoteDescription) {
+      peer.pendingCandidates.push(candidate)
+      return
+    }
+    await this.applyCandidate(peer, candidate)
+  }
+
+  /**
+   * Hold a candidate for a peer that has not been created yet.
+   *
+   * Capped, and dropped oldest-first: a peer id that never materializes (a
+   * guest that left mid-handshake, or a hostile sender) must not be able to
+   * grow this without bound. Early candidates are the *first* ones gathered,
+   * which on most networks are the host candidates — the ones most likely to
+   * succeed — so keeping the earliest would be wrong only if the cap were
+   * small enough to matter, and it is not.
+   */
+  private bufferEarlyCandidate(peerId: string, candidate: RTCIceCandidateInit): void {
+    const queue = this.earlyCandidates.get(peerId) ?? []
+    if (queue.length >= MAX_EARLY_CANDIDATES) queue.shift()
+    queue.push(candidate)
+    this.earlyCandidates.set(peerId, queue)
+  }
+
+  private async applyCandidate(peer: Peer, candidate: RTCIceCandidateInit): Promise<void> {
+    try {
+      await peer.pc.addIceCandidate(candidate)
+    } catch {
+      /*
+       * A rejected candidate is survivable — it removes one possible path, not
+       * the connection. Failing loudly here would turn a recoverable blip into
+       * a reported error during an otherwise fine handshake.
+       */
+    }
+  }
+
+  /** Flush candidates that arrived before the remote description. */
+  private async flushCandidates(peer: Peer): Promise<void> {
+    const queued = peer.pendingCandidates.splice(0)
+    for (const candidate of queued) await this.applyCandidate(peer, candidate)
   }
 
   isSupported(): boolean {
@@ -84,6 +214,34 @@ export class PeerConnectionManager {
     return this.peers.get(peerId)?.state ?? null
   }
 
+  /**
+   * Send a command to a peer over the control channel.
+   *
+   * Returns false when the channel is not open, so the caller can tell the
+   * operator the command did not reach the guest instead of optimistically
+   * updating the UI.
+   */
+  sendControl(peerId: string, message: AnyChannelMessage): boolean {
+    return this.peers.get(peerId)?.control.send(message) ?? false
+  }
+
+  /** Broadcast a message to every connected peer. Returns the delivered count. */
+  broadcastControl(message: AnyChannelMessage): number {
+    let delivered = 0
+    for (const peer of this.peers.values()) {
+      if (peer.control.send(message)) delivered += 1
+    }
+    return delivered
+  }
+
+  getControlState(peerId: string): ControlChannelState | null {
+    return this.peers.get(peerId)?.control.getState() ?? null
+  }
+
+  isControlOpen(peerId: string): boolean {
+    return this.peers.get(peerId)?.control.isOpen() ?? false
+  }
+
   listPeers(): PeerState[] {
     return [...this.peers.values()].map((peer) => peer.state)
   }
@@ -93,12 +251,31 @@ export class PeerConnectionManager {
   }
 
   /**
+   * Offer to a peer whose id the signaling transport already told us.
+   *
+   * The room-based path uses this: the relay assigns ids, so the connection is
+   * keyed on the *remote* peer's id rather than one we invent. That is what
+   * lets answers and candidates be routed back without any correlation step.
+   */
+  async createOfferTo(
+    remotePeerId: string,
+  ): Promise<{ peerId: string; envelope: SignalEnvelope } | null> {
+    return this.createOfferInternal(remotePeerId)
+  }
+
+  /**
    * Create a peer as the host and produce an offer with ICE candidates
    * embedded (vanilla ICE — see `ice.ts` for why).
    */
   async createOffer(): Promise<{ peerId: string; envelope: SignalEnvelope } | null> {
+    return this.createOfferInternal(createPeerId())
+  }
+
+  private async createOfferInternal(
+    peerId: string,
+  ): Promise<{ peerId: string; envelope: SignalEnvelope } | null> {
     if (!this.isSupported()) return null
-    const peer = this.createPeer(createPeerId(), 'host')
+    const peer = this.createPeer(peerId, 'host')
     this.setStatus(peer, 'initializing')
 
     try {
@@ -111,10 +288,25 @@ export class PeerConnectionManager {
         peer.pc.addTransceiver('audio', { direction: 'recvonly' })
       }
 
+      /*
+       * The *offering* side creates the control channel, so its m-line is in
+       * the offer and no second negotiation round is needed — which manual
+       * signaling could not perform without another copy/paste. The answering
+       * side picks it up through `ondatachannel`.
+       */
+      peer.control.attach(peer.pc.createDataChannel(CONTROL_CHANNEL_LABEL, { ordered: true }))
+
       const offer = await peer.pc.createOffer()
       await peer.pc.setLocalDescription(offer)
 
-      const outcome = await waitForIceGathering(peer.pc)
+      /*
+       * With trickle, the description goes out immediately and candidates
+       * follow on the live channel — which is most of why a server-backed
+       * connection comes up so much faster than the manual path.
+       */
+      const outcome = this.trickle
+        ? immediateOutcome(peer.pc)
+        : await waitForIceGathering(peer.pc)
       const envelope = this.toEnvelope(peer, 'offer', outcome.description.sdp)
       this.setStatus(peer, 'waiting-for-answer')
       this.events.onLocalDescriptionReady?.(envelope, outcome)
@@ -139,12 +331,16 @@ export class PeerConnectionManager {
 
     try {
       await peer.pc.setRemoteDescription({ type: 'offer', sdp: envelope.sdp })
+      peer.hasRemoteDescription = true
+      await this.flushCandidates(peer)
       await this.syncSenders(peer)
 
       const answer = await peer.pc.createAnswer()
       await peer.pc.setLocalDescription(answer)
 
-      const outcome = await waitForIceGathering(peer.pc)
+      const outcome = this.trickle
+        ? immediateOutcome(peer.pc)
+        : await waitForIceGathering(peer.pc)
       const answerEnvelope = this.toEnvelope(peer, 'answer', outcome.description.sdp)
       this.setStatus(peer, 'connecting')
       this.events.onLocalDescriptionReady?.(answerEnvelope, outcome)
@@ -183,6 +379,8 @@ export class PeerConnectionManager {
 
     try {
       await peer.pc.setRemoteDescription({ type: 'answer', sdp: envelope.sdp })
+      peer.hasRemoteDescription = true
+      await this.flushCandidates(peer)
       this.setStatus(peer, 'connecting')
       return true
     } catch (error) {
@@ -196,12 +394,16 @@ export class PeerConnectionManager {
 
   /** Close one peer and release everything it owns. */
   closePeer(peerId: string): void {
+    this.earlyCandidates.delete(peerId)
     const peer = this.peers.get(peerId)
     if (!peer) return
     this.peers.delete(peerId)
     this.stopStats(peer)
 
+    peer.control.dispose()
+
     peer.pc.onicecandidate = null
+    peer.pc.ondatachannel = null
     peer.pc.ontrack = null
     peer.pc.onconnectionstatechange = null
     peer.pc.oniceconnectionstatechange = null
@@ -233,18 +435,9 @@ export class PeerConnectionManager {
 
   closeAll(): void {
     for (const id of [...this.peers.keys()]) this.closePeer(id)
-  }
-
-  /**
-   * Inject a disconnect, for the demo panel's "guest disconnect" simulation.
-   * This drives the *real* close path so the UI transition is genuine; the
-   * caller is responsible for labelling it as simulated.
-   */
-  simulateDisconnect(peerId: string): void {
-    const peer = this.peers.get(peerId)
-    if (!peer) return
-    this.setStatus(peer, 'failed', 'Connection lost (simulated from the demo panel).')
-    this.closePeer(peerId)
+    // Buffers for peers that never got created have nothing to close, so they
+    // are dropped here rather than leaking until the next page load.
+    this.earlyCandidates.clear()
   }
 
   private createPeer(peerId: string, role: PeerRole): Peer {
@@ -252,6 +445,13 @@ export class PeerConnectionManager {
     if (existing) this.closePeer(peerId)
 
     const pc = new RTCPeerConnection(buildPeerConfiguration(this.iceServerUrls))
+    const control = new ControlChannel(peerId)
+    control.setEvents({
+      onStateChange: (state) => this.events.onControlState?.(state),
+      onControl: (message) => this.events.onControlMessage?.(peerId, message),
+      onGuestMessage: (message) => this.events.onGuestMessage?.(peerId, message),
+    })
+
     const peer: Peer = {
       id: peerId,
       role,
@@ -260,7 +460,19 @@ export class PeerConnectionManager {
       remoteStream: null,
       statsTimer: null,
       previousStatsSample: null,
+      control,
+      hasRemoteDescription: false,
+      pendingCandidates: [],
     }
+    // Anything that arrived while this peer was still being built. They are
+    // put on the pending queue rather than applied, because the remote
+    // description has not landed yet either.
+    const early = this.earlyCandidates.get(peerId)
+    if (early) {
+      peer.pendingCandidates.push(...early)
+      this.earlyCandidates.delete(peerId)
+    }
+
     this.peers.set(peerId, peer)
     this.attachListeners(peer)
     return peer
@@ -268,6 +480,19 @@ export class PeerConnectionManager {
 
   private attachListeners(peer: Peer): void {
     const { pc } = peer
+
+    // The answering side receives the channel the offerer created.
+    pc.ondatachannel = (event: RTCDataChannelEvent) => {
+      if (event.channel.label !== CONTROL_CHANNEL_LABEL) return
+      peer.control.attach(event.channel)
+    }
+
+    pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
+      if (!this.trickle) return
+      // A null candidate is end-of-gathering; there is nothing to relay.
+      if (!event.candidate) return
+      this.events.onLocalCandidate?.(peer.id, event.candidate.toJSON())
+    }
 
     pc.ontrack = (event: RTCTrackEvent) => {
       // `event.streams[0]` is the remote stream when the sender grouped its
@@ -310,13 +535,7 @@ export class PeerConnectionManager {
           break
         case 'failed':
           this.stopStats(peer)
-          this.setStatus(
-            peer,
-            'failed',
-            'ICE connectivity checks failed. Both peers gathered candidates but could not reach ' +
-              'each other. This usually means symmetric NAT or a firewall blocking UDP, which ' +
-              'requires a TURN relay to traverse.',
-          )
+          this.setStatus(peer, 'failed', describeIceFailure(peer.pc))
           break
         case 'closed':
           this.stopStats(peer)
@@ -388,7 +607,25 @@ export class PeerConnectionManager {
     peer.statsTimer = null
   }
 
+  /**
+   * Move a peer's reported status.
+   *
+   * A *progress* status is dropped once the connection has already settled.
+   * This is not cosmetic — it fixes a real stuck state:
+   *
+   *   `acceptAnswer` awaits `setRemoteDescription`, then reports `connecting`.
+   *   With trickle ICE on a fast network the candidates are already in flight,
+   *   so `connectionState` can reach `connected` *during* that await. The
+   *   optimistic `connecting` then lands afterwards and overwrites it — and
+   *   because the peer is already connected it fires no further
+   *   `connectionstatechange`, so nothing ever corrects it. The connection
+   *   works, media flows, and the control room says "Connecting" forever.
+   *
+   * Settled statuses always win, because they are the ones
+   * `RTCPeerConnection` itself justifies.
+   */
   private setStatus(peer: Peer, status: PeerStatus, error?: string): void {
+    if (PROGRESS_STATUSES.has(status) && isSettledConnection(peer.pc.connectionState)) return
     this.updateState(peer, { status, ...(error !== undefined ? { error } : {}) })
   }
 
@@ -423,6 +660,63 @@ export class PeerConnectionManager {
     )
     return candidates.length === 1 ? (candidates[0] ?? null) : null
   }
+}
+
+/**
+ * A gathering "outcome" for the trickle path.
+ *
+ * Shaped like the vanilla-ICE result so callers and the connectivity readout
+ * need no special case, but reports `complete: false` and whatever candidates
+ * happen to be in the SDP already — which is honest: gathering really is still
+ * in progress, and the rest arrive separately.
+ */
+function immediateOutcome(pc: RTCPeerConnection): GatheringOutcome {
+  const description = pc.localDescription
+  const sdp = description?.sdp ?? ''
+  return {
+    description: description as RTCSessionDescription,
+    complete: false,
+    candidateCount: (sdp.match(/^a=candidate:/gm) ?? []).length,
+    elapsedMs: 0,
+    hasPublicCandidate: /^a=candidate:.* typ (srflx|relay)/m.test(sdp),
+  }
+}
+
+/**
+ * Explain an ICE failure in terms of what was actually gathered.
+ *
+ * A flat "symmetric NAT, you need TURN" is right often enough to be useless:
+ * it reads the same whether a relay was configured and still failed, or no
+ * relay was ever offered, or the two sides never got past host candidates. The
+ * local description says which of those happened, so the message says it too —
+ * and names the one setting that fixes the common case.
+ */
+function describeIceFailure(pc: RTCPeerConnection): string {
+  const sdp = pc.localDescription?.sdp ?? ''
+  const relay = /^a=candidate:.* typ relay/m.test(sdp)
+  const publicAddress = /^a=candidate:.* typ (srflx|relay)/m.test(sdp)
+
+  if (relay) {
+    return (
+      'ICE connectivity checks failed even with a TURN relay among the candidates. The relay ' +
+      'itself is the thing to check: confirm the credentials are current, that its TCP/TLS port ' +
+      'is reachable from both networks, and that it is not rejecting allocations.'
+    )
+  }
+  if (publicAddress) {
+    return (
+      'ICE connectivity checks failed. Both sides found their public address but could not reach ' +
+      'each other, which is what symmetric NAT or a firewall blocking UDP looks like. Only a TURN ' +
+      'relay traverses that — add one under Settings › ICE servers as ' +
+      'turn:host:port|username:password, or set VITE_TURN_URLS for every device at once.'
+    )
+  }
+  return (
+    'ICE connectivity checks failed, and only local-network candidates were gathered — no public ' +
+    'address was discovered at all. This connection can only work between devices on the same ' +
+    'network. Check that STUN is reachable under Settings › ICE servers, and add a TURN relay ' +
+    'for connections across networks.'
+  )
 }
 
 function emptyState(peerId: string, role: PeerRole): PeerState {

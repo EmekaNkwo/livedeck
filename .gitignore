@@ -28,3 +28,9 @@ dist-ssr
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# Local environment — the committed templates are *.env.example
+.env
+.env.*
+!.env.example
+server/.env

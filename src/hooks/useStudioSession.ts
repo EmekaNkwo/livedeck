@@ -25,7 +25,6 @@ import { useSceneStore } from '@/stores/sceneStore'
 import { useGuestStore } from '@/stores/guestStore'
 import { useAudioStore } from '@/stores/audioStore'
 import { useRecordingStore } from '@/stores/recordingStore'
-import { useSimulationStore } from '@/stores/simulationStore'
 
 /**
  * Session lifecycle: create, open, persist, reset, end.
@@ -51,8 +50,16 @@ export type UseStudioSession = {
   sessions: StudioSession[]
   ready: boolean
 
-  createSession: (options?: { name?: string; mode?: StudioMode }) => StudioSession
+  createSession: (options?: { name?: string; mode?: StudioMode; id?: string }) => StudioSession
   openSession: (sessionId: string) => StudioSession | null
+  /**
+   * Open the room with this id, creating it if it does not exist yet.
+   *
+   * This is how every role route enters: a room is addressed by name, so
+   * navigating to `/director/my-room` *is* creating `my-room`. There is no
+   * separate "new project" step.
+   */
+  ensureRoom: (roomId: string, options?: { mode?: StudioMode }) => StudioSession
   renameSession: (name: string) => void
   setMode: (mode: StudioMode) => void
   /** Clear the production but keep the session. */
@@ -131,10 +138,11 @@ export function useStudioSession(): UseStudioSession {
   }, [])
 
   const createSession = useCallback(
-    (options?: { name?: string; mode?: StudioMode }): StudioSession => {
+    (options?: { name?: string; mode?: StudioMode; id?: string }): StudioSession => {
       const now = Date.now()
       const next: StudioSession = {
-        id: createSessionId(),
+        // An explicit id lets a room be addressed by name from a URL.
+        id: options?.id ?? createSessionId(),
         name: options?.name?.trim() || 'Untitled production',
         mode: options?.mode ?? 'local',
         createdAt: now,
@@ -165,6 +173,23 @@ export function useStudioSession(): UseStudioSession {
       return opened
     },
     [hydrate, refreshSessions, setSession, setStatus],
+  )
+
+  const ensureRoom = useCallback(
+    (roomId: string, options?: { mode?: StudioMode }): StudioSession => {
+      const current = useStudioStore.getState().session
+      if (current?.id === roomId) return current
+
+      const existing = openSession(roomId)
+      if (existing) return existing
+
+      return createSession({
+        id: roomId,
+        name: roomId,
+        ...(options?.mode ? { mode: options.mode } : {}),
+      })
+    },
+    [createSession, openSession],
   )
 
   const setMode = useCallback(
@@ -221,7 +246,6 @@ export function useStudioSession(): UseStudioSession {
     useGuestStore.getState().clear()
     useAudioStore.getState().clear()
     useRecordingStore.getState().reset()
-    useSimulationStore.getState().reset()
     resetEphemeral()
     setSession(null)
     setStatus('ended')
@@ -262,7 +286,6 @@ export function useStudioSession(): UseStudioSession {
         useSceneStore.getState().clear()
         useGuestStore.getState().clear()
         useAudioStore.getState().clear()
-        useSimulationStore.getState().reset()
         resetEphemeral()
         useSceneStore.getState().createScene('Main')
         save()
@@ -344,6 +367,7 @@ export function useStudioSession(): UseStudioSession {
     ready,
     createSession,
     openSession,
+    ensureRoom,
     renameSession,
     setMode,
     requestResetSession,

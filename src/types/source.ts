@@ -91,8 +91,6 @@ export type MediaSource = {
   streamKey: string | null
   /** Program-mix level, 0..1.5 (values > 1 apply makeup gain). */
   volume: number
-  /** True when this source is fed by the simulation layer, not real capture. */
-  simulated: boolean
   createdAt: number
 }
 

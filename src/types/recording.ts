@@ -46,7 +46,6 @@ export type RecordingError = {
     | 'recorder-error'
     | 'finalize-failed'
     | 'persist-failed'
-    | 'simulated'
   message: string
   recoverable: boolean
   at: number

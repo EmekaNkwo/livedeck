@@ -17,7 +17,6 @@ export type PanelId = 'sources' | 'properties' | 'audio' | 'scenes' | 'diagnosti
 export type DialogId =
   | 'settings'
   | 'shortcuts'
-  | 'invite'
   | 'command-palette'
   | 'add-source'
   | 'recordings'

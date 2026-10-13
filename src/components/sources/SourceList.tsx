@@ -21,7 +21,7 @@ import { useSceneStore } from '@/stores/sceneStore'
 import { useStudioStore } from '@/stores/studioStore'
 import { Button } from '@/components/shared/Button'
 import { Panel } from '@/components/shared/Panel'
-import { EmptyState, SimulatedBadge, StatusDot } from '@/components/shared/Status'
+import { EmptyState, StatusDot } from '@/components/shared/Status'
 import { TextField } from '@/components/shared/Field'
 
 /**
@@ -317,7 +317,6 @@ function SourceRow({
           </button>
         )}
 
-        {source.simulated ? <SimulatedBadge /> : null}
       </div>
 
       <div className="flex items-center gap-1">

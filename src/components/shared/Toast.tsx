@@ -47,7 +47,7 @@ export function Toast() {
             exit={{ opacity: 0, y: reducedMotion ? 0 : 8 }}
             transition={{ duration: reducedMotion ? 0 : 0.18 }}
             className={cn(
-              'pointer-events-auto flex max-w-md items-start gap-2.5 rounded-lg border px-3 py-2.5 shadow-xl',
+              'pointer-events-auto flex max-w-md items-start gap-2.5 rounded-sm border px-3 py-2.5 shadow-xl',
               toast.tone === 'error'
                 ? 'border-live-500/50 bg-deck-800 text-live-400'
                 : toast.tone === 'success'

@@ -1,10 +1,13 @@
-import { expect, test } from '@playwright/test'
+import { type Page, expect, test } from '@playwright/test'
 import {
   addSourceDialog,
   canvasHasContent,
-  createSession,
   onAirTally,
   openDiagnostics,
+  openDirector,
+  openSources,
+  recordingPanel,
+  sceneTabs,
   sourceRows,
   startCamera,
   startMicrophone,
@@ -13,66 +16,80 @@ import {
 /**
  * Scenario C — resource cleanup.
  *
- * Start capture, record, stop, remove a source, end the session, and verify the
- * resources this session owned were released. Leaks here are invisible in
- * ordinary use but make a long production degrade, so they are asserted
- * explicitly against the diagnostics readout, which reflects the real
- * StreamRegistry and track states.
+ * Start capture, record, stop, remove a source, leave the room, and verify the
+ * resources that room owned were released. Leaks here are invisible in ordinary
+ * use but degrade a long production, so they are asserted against the
+ * diagnostics readout, which reflects the real StreamRegistry and track states.
+ *
+ * Diagnostics lives behind a tab in the control room, so every read opens that
+ * tab first — hence an async reader rather than a bare locator.
  */
 
-const metric = (page: import('@playwright/test').Page, label: string) =>
-  page
+function metricValue(page: Page, label: string) {
+  return page
     .getByRole('region', { name: 'Diagnostics' })
     .getByText(new RegExp(`^${label}$`))
     .locator('xpath=following-sibling::dd[1]')
+}
+
+async function readMetric(page: Page, label: string): Promise<number> {
+  await openDiagnostics(page)
+  const value = metricValue(page, label)
+  await expect(value).toBeVisible()
+  return Number((await value.textContent())?.trim() ?? '0')
+}
+
+async function readMetricText(page: Page, label: string): Promise<string> {
+  await openDiagnostics(page)
+  const value = metricValue(page, label)
+  await expect(value).toBeVisible()
+  return ((await value.textContent()) ?? '').trim()
+}
 
 test.describe('Scenario C: resource cleanup', () => {
   test('releases a source’s stream when the source is deleted', async ({ page }) => {
-    await createSession(page, 'Cleanup')
+    await openDirector(page, 'cleanup-delete')
     await startCamera(page)
-    await openDiagnostics(page)
 
-    await expect.poll(async () => Number((await metric(page, 'Live tracks').textContent()) ?? 0))
-      .toBeGreaterThan(0)
+    expect(await readMetric(page, 'Live tracks')).toBeGreaterThan(0)
 
     // Delete the camera source; its capture should stop with it.
+    await openSources(page)
     await page.getByRole('button', { name: /Delete Camera/i }).click()
     const confirm = page.getByRole('dialog')
     await expect(confirm).toBeVisible()
     await confirm.getByRole('button', { name: /Delete source/i }).click()
 
-    await expect.poll(async () => Number((await metric(page, 'Registered streams').textContent()) ?? 1))
-      .toBe(0)
-    await expect.poll(async () => Number((await metric(page, 'Live tracks').textContent()) ?? 1))
-      .toBe(0)
+    await expect.poll(() => readMetric(page, 'Registered streams'), { timeout: 20_000 }).toBe(0)
+    expect(await readMetric(page, 'Live tracks')).toBe(0)
   })
 
   test('duplicating then deleting the copy keeps the original capture alive', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page, 'cleanup-dup')
     await startCamera(page)
-    await openDiagnostics(page)
 
     // The clone shares the capture — one stream, two references.
+    await openSources(page)
     await page.getByRole('button', { name: /Duplicate Camera/i }).click()
     await expect(sourceRows(page).filter({ hasText: 'Camera copy' })).toHaveCount(1)
-    await expect(metric(page, 'Registered streams')).toHaveText('1')
+    expect(await readMetric(page, 'Registered streams')).toBe(1)
 
     // Deleting the copy must not black out the original.
+    await openSources(page)
     await page.getByRole('button', { name: /Delete Camera copy/i }).click()
     await page.getByRole('dialog').getByRole('button', { name: /Delete source/i }).click()
 
-    await expect(metric(page, 'Registered streams')).toHaveText('1')
-    await expect.poll(async () => Number((await metric(page, 'Live tracks').textContent()) ?? 0))
-      .toBeGreaterThan(0)
+    expect(await readMetric(page, 'Registered streams')).toBe(1)
+    expect(await readMetric(page, 'Live tracks')).toBeGreaterThan(0)
     await expect.poll(() => canvasHasContent(page), { timeout: 15_000 }).toBe(true)
   })
 
   test('stopping a recording releases its canvas capture', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page, 'cleanup-record')
     await startCamera(page)
     await expect.poll(() => canvasHasContent(page), { timeout: 20_000 }).toBe(true)
 
-    const recording = page.getByRole('region', { name: 'Recording' })
+    const recording = await recordingPanel(page)
     await recording.getByRole('button', { name: /Start recording/i }).click()
     await expect(onAirTally(page)).toBeVisible()
     await page.waitForTimeout(2000)
@@ -80,30 +97,29 @@ test.describe('Scenario C: resource cleanup', () => {
     await recording.getByRole('button', { name: /Stop & save/i }).click()
     await expect(recording.getByText(/Saved to the library/i)).toBeVisible({ timeout: 30_000 })
 
-    await openDiagnostics(page)
     // Only the camera's stream remains; the recorder's canvas capture is gone.
-    await expect(metric(page, 'Registered streams')).toHaveText('1')
-    await expect(metric(page, 'Status')).toHaveText('complete')
+    expect(await readMetric(page, 'Registered streams')).toBe(1)
+    expect(await readMetricText(page, 'Status')).toBe('complete')
   })
 
-  test('ending the session releases every device and returns to the lobby', async ({ page }) => {
-    await createSession(page, 'Ending')
+  test('leaving the room releases every device and returns to the landing page', async ({
+    page,
+  }) => {
+    await openDirector(page, 'cleanup-leave')
     await startCamera(page)
     await startMicrophone(page)
-    await openDiagnostics(page)
 
-    await expect.poll(async () => Number((await metric(page, 'Registered streams').textContent()) ?? 0))
-      .toBeGreaterThanOrEqual(2)
+    expect(await readMetric(page, 'Registered streams')).toBeGreaterThanOrEqual(2)
 
-    await page.getByRole('button', { name: /End this production/i }).click()
+    await page.getByRole('button', { name: /Leave this room/i }).click()
     await page.getByRole('dialog').getByRole('button', { name: /End production/i }).click()
 
-    // Back in the lobby, with the session preserved for reopening.
+    // Back on the landing page, with the room preserved for reopening.
     await expect(page).toHaveURL(/\/$|\/#?$/)
     await expect(page.getByRole('heading', { name: /LiveDeck Studio/ })).toBeVisible()
-    await expect(page.getByText('Ending')).toBeVisible()
+    await expect(page.getByText('cleanup-leave').first()).toBeVisible()
 
-    // Every track this session owned has been stopped. Verified against the
+    // Every track that room owned has been stopped. Verified against the
     // browser rather than against our own bookkeeping.
     const liveTracks = await page.evaluate(() => {
       const videos = [...document.querySelectorAll('video')]
@@ -116,21 +132,23 @@ test.describe('Scenario C: resource cleanup', () => {
   })
 
   test('scenes and sources survive a reload; live streams do not', async ({ page }) => {
-    await createSession(page, 'Persistence')
+    await openDirector(page, 'cleanup-persist')
 
+    await openSources(page)
     await page.getByRole('button', { name: 'Add a source' }).click()
     await addSourceDialog(page).getByLabel('Content').fill('Persisted caption')
     await addSourceDialog(page).getByRole('button', { name: /Add text source/i }).click()
 
     await page.getByRole('button', { name: /New scene/i }).click()
-    await expect(page.getByRole('tab')).toHaveCount(2)
+    await expect(sceneTabs(page)).toHaveCount(2)
 
     // Autosave is debounced.
     await page.waitForTimeout(1200)
     await page.reload()
 
     // Configuration came back.
-    await expect(page.getByRole('tab')).toHaveCount(2)
+    await expect(sceneTabs(page)).toHaveCount(2)
+    await openSources(page)
     await expect(sourceRows(page).filter({ hasText: 'Persisted caption' })).toHaveCount(1)
 
     // Capture did not — a stream cannot be serialized, and the UI must not
@@ -141,11 +159,11 @@ test.describe('Scenario C: resource cleanup', () => {
   })
 
   test('repeated start/stop cycles do not accumulate streams', async ({ page }) => {
-    await createSession(page)
-    await openDiagnostics(page)
+    await openDirector(page, 'cleanup-cycles')
 
     for (let i = 0; i < 3; i += 1) {
       await startCamera(page)
+      await openSources(page)
       await page.getByRole('button', { name: /Stop camera/i }).click()
       await expect(
         page.getByRole('region', { name: 'Camera' }).getByText('Idle', { exact: true }),
@@ -153,7 +171,6 @@ test.describe('Scenario C: resource cleanup', () => {
     }
 
     // Each cycle must fully release; otherwise a long session leaks devices.
-    await expect.poll(async () => Number((await metric(page, 'Registered streams').textContent()) ?? 1))
-      .toBe(0)
+    await expect.poll(() => readMetric(page, 'Registered streams'), { timeout: 20_000 }).toBe(0)
   })
 })

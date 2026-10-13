@@ -58,9 +58,50 @@ export function buildIceServers(urls: string[]): IceServerConfig[] {
   return servers.length > 0 ? servers : [{ urls: [...DEFAULT_STUN_URLS] }]
 }
 
+/**
+ * ICE servers configured at build time, via environment variables.
+ *
+ * This exists because the single most common connection failure in this
+ * project has one cause and one fix: STUN alone cannot traverse symmetric NAT
+ * or a UDP-blocking firewall, and only a TURN relay can. Asking every operator
+ * to retype credentials into Settings on every device is how that fix goes
+ * unapplied, so a deployment can bake it in instead.
+ *
+ *   VITE_TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
+ *   VITE_TURN_USERNAME=…
+ *   VITE_TURN_CREDENTIAL=…
+ *
+ * Credentials may also be appended per URL as `turn:host:port|user:pass`, which
+ * takes precedence over the shared pair above.
+ *
+ * These are **merged with**, not substituted for, whatever is in Settings — an
+ * operator adding their own TURN server never loses the deployment's.
+ */
+export function envIceServerUrls(): string[] {
+  const raw = import.meta.env.VITE_TURN_URLS
+  if (typeof raw !== 'string' || !raw.trim()) return []
+
+  const username = (import.meta.env.VITE_TURN_USERNAME ?? '').toString().trim()
+  const credential = (import.meta.env.VITE_TURN_CREDENTIAL ?? '').toString().trim()
+  const suffix = username && credential ? `|${username}:${credential}` : ''
+
+  return raw
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => (entry.includes('|') || !suffix ? entry : `${entry}${suffix}`))
+}
+
 export function buildPeerConfiguration(iceServerUrls: string[]): RTCConfiguration {
+  // The environment's servers go last so an explicitly configured entry wins a
+  // duplicate, and `buildIceServers` still sees a non-empty list either way.
+  const merged = [...iceServerUrls]
+  for (const url of envIceServerUrls()) {
+    if (!merged.includes(url)) merged.push(url)
+  }
+
   return {
-    iceServers: buildIceServers(iceServerUrls) as RTCIceServer[],
+    iceServers: buildIceServers(merged) as RTCIceServer[],
     // 'all' lets host, srflx and (if configured) relay candidates be used.
     iceTransportPolicy: 'all',
     bundlePolicy: 'max-bundle',

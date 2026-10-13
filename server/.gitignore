@@ -1,0 +1,12 @@
+# Next.js build output and generated types
+.next/
+next-env.d.ts
+
+# Compiled server (`npm run build` → `npm start`)
+dist/
+
+# tsc incremental cache
+*.tsbuildinfo
+
+node_modules
+*.local

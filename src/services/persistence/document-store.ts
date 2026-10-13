@@ -99,31 +99,16 @@ export function saveDocument(document: Omit<StudioDocument, 'version' | 'savedAt
     ...document,
     version: 1,
     savedAt: Date.now(),
-    // Null out live references and drop simulated sources: a demo guest's
-    // synthetic feed cannot be recreated from a saved definition, and
-    // restoring a dead reference would show a broken source.
-    sources: document.sources
-      .filter((source) => !source.simulated)
-      .map((source) => ({ ...source, streamKey: null })),
-    guests: document.guests
-      .filter((guest) => !guest.simulated)
-      .map((guest) => ({ ...guest, peerId: null })),
-  }
-  const removedSourceIds = new Set(
-    document.sources.filter((source) => source.simulated).map((source) => source.id),
-  )
-  if (removedSourceIds.size > 0) {
-    payload.sourceOrder = payload.sourceOrder.filter((id) => !removedSourceIds.has(id))
-    payload.scenes = payload.scenes.map((scene) => ({
-      ...scene,
-      items: scene.items.filter((item) => !removedSourceIds.has(item.sourceId)),
-    }))
-    payload.audioChannels = payload.audioChannels.filter(
-      (channel) => !removedSourceIds.has(channel.sourceId),
-    )
-    payload.audioChannelOrder = payload.audioChannelOrder.filter(
-      (id) => !removedSourceIds.has(id),
-    )
+    /*
+     * Null out live references.
+     *
+     * A stream key and a peer id are both valid only for the page that created
+     * them. Persisting either would restore a source or guest pointing at a
+     * capture that no longer exists, so the definition is kept and the live
+     * handle is dropped.
+     */
+    sources: document.sources.map((source) => ({ ...source, streamKey: null })),
+    guests: document.guests.map((guest) => ({ ...guest, peerId: null })),
   }
   return writeJson(documentKey(document.sessionId), payload)
 }

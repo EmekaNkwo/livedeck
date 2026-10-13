@@ -3,15 +3,14 @@ import { useStudioDiagnostics } from '@/hooks/useStudioDiagnostics'
 import { useStudioStore } from '@/stores/studioStore'
 import { formatMetric } from '@/utils/format'
 import { Panel } from '@/components/shared/Panel'
-import { Badge, Metric, Notice, SimulatedBadge } from '@/components/shared/Status'
+import { Metric, Notice } from '@/components/shared/Status'
 
 /**
  * Technical inspection.
  *
  * Every number here is either a real reading or an em dash. Metrics the
  * browser did not report are rendered as "—" rather than being filled in with
- * something plausible, and any value originating in the simulation layer is
- * tagged, so real and injected state can never be confused.
+ * something plausible.
  *
  * This is also where raw error detail belongs — ordinary users see a plain
  * message in the relevant panel; the technical string lives here.
@@ -25,11 +24,6 @@ export function DiagnosticsPanel() {
   return (
     <Panel
       title="Diagnostics"
-      badge={
-        diagnostics.simulationsActive.length > 0 ? (
-          <Badge tone="warn">{diagnostics.simulationsActive.length} sim</Badge>
-        ) : null
-      }
       collapsed={collapsed}
       onToggleCollapsed={() => togglePanel('diagnostics')}
     >
@@ -128,8 +122,7 @@ export function DiagnosticsPanel() {
         <Section title="Peer connections">
           {diagnostics.peers.length === 0 ? (
             <p className="text-[11px] text-ink-500">
-              No peer connections. Simulated guests have no transport, so they produce no
-              statistics.
+              No peer connections, so there are no statistics to report.
             </p>
           ) : (
             diagnostics.peers.map((peer) => (
@@ -141,7 +134,6 @@ export function DiagnosticsPanel() {
                   <p className="min-w-0 flex-1 truncate text-[11px] font-medium text-ink-200">
                     {peer.guestName}
                   </p>
-                  {peer.simulatedDegradation ? <SimulatedBadge /> : null}
                 </div>
                 <Metric label="Status" value={peer.state.status} mono={false} />
                 <Metric label="connectionState" value={peer.state.connectionState ?? '—'} />
@@ -153,17 +145,14 @@ export function DiagnosticsPanel() {
                 <Metric
                   label="Round-trip time"
                   value={formatMetric(peer.stats?.roundTripTimeMs, 'ms', 1)}
-                  simulated={peer.simulatedDegradation}
                 />
                 <Metric
                   label="Video bitrate"
                   value={formatMetric(peer.stats?.videoBitrateKbps, 'kbps')}
-                  simulated={peer.simulatedDegradation}
                 />
                 <Metric
                   label="Audio bitrate"
                   value={formatMetric(peer.stats?.audioBitrateKbps, 'kbps')}
-                  simulated={peer.simulatedDegradation}
                 />
                 <Metric label="Frame rate" value={formatMetric(peer.stats?.framesPerSecond, 'fps')} />
                 <Metric label="Frames dropped" value={formatMetric(peer.stats?.framesDropped, '')} />
@@ -180,15 +169,6 @@ export function DiagnosticsPanel() {
             ))
           )}
         </Section>
-
-        {diagnostics.simulationsActive.length > 0 ? (
-          <Section title="Active simulations">
-            <Notice tone="warning">
-              These are injected from the demo panel and are not real browser or network
-              conditions: {diagnostics.simulationsActive.join(', ')}.
-            </Notice>
-          </Section>
-        ) : null}
 
         {diagnostics.lastMediaError ? (
           <Section title="Last media error">

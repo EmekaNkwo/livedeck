@@ -50,13 +50,10 @@ export type PeerState = {
 
 /**
  * Guest identity metadata. Serializable and persisted; holds no live objects.
- * `simulated` guests are produced by the simulation layer and are always
- * labelled as such in the UI.
  */
 export type Guest = {
   id: string
   name: string
-  simulated: boolean
   /** Hide this guest's video in the program mix. */
   videoHidden: boolean
   /** Mute this guest in the *local program mix* — does not affect the peer. */

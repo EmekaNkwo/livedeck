@@ -198,20 +198,6 @@ describe('start', () => {
       expect.objectContaining({ code: 'recorder-error', recoverable: true }),
     )
   })
-
-  it('routes the injected demo failure through the real error path', async () => {
-    installRecorder({ withPause: true })
-    const onError = vi.fn()
-    engine.setEvents({ onError })
-
-    expect(await engine.start({ ...startOptions(), simulateFailure: true })).toBe(false)
-    expect(engine.getStatus()).toBe('error')
-    expect(onError).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'simulated', recoverable: true }),
-    )
-    // Nothing was actually started.
-    expect(instances).toHaveLength(0)
-  })
 })
 
 describe('stop and finalize', () => {

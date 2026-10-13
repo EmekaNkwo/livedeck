@@ -6,6 +6,7 @@ import { detectCapabilities } from '@/lib/capabilities'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useSourceStore } from '@/stores/sourceStore'
 import { streamRegistry } from '@/services/media/stream-registry'
+import { resolveRelayUrl } from '@/services/signaling/relay-url'
 
 /**
  * Output quality and editor preferences.
@@ -39,7 +40,51 @@ export type UseStudioSettings = {
   setShowSafeAreas: (enabled: boolean) => void
   setReducedMotion: (mode: StudioSettings['reducedMotion']) => void
   setIceServerUrls: (urls: string[]) => void
+  setSignalingTransport: (transport: StudioSettings['signalingTransport']) => void
+  setSignalingServerUrl: (url: string) => void
+  /** `null` when the current transport configuration is usable. */
+  signalingConfigError: string | null
   reset: () => void
+}
+
+/**
+ * Validate the relay URL before it can break a connection attempt.
+ *
+ * The adapter upgrades http→ws itself, so either scheme is fine; what is not
+ * fine is something that is not a URL at all, because the failure would
+ * otherwise surface much later as an opaque socket error.
+ *
+ * A *blank* field is valid and means "work it out" — the resolved address is
+ * what gets validated, since that is what will actually be dialled.
+ */
+function validateSignalingConfig(settings: StudioSettings): string | null {
+  if (settings.signalingTransport !== 'server') return null
+
+  const raw = resolveRelayUrl(settings.signalingServerUrl)
+  if (!raw) return 'Enter the address of your signaling server.'
+
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return 'That is not a valid URL. Include the scheme, for example ws://localhost:3000.'
+  }
+
+  if (!['ws:', 'wss:', 'http:', 'https:'].includes(parsed.protocol)) {
+    return `Unsupported scheme "${parsed.protocol}". Use ws, wss, http, or https.`
+  }
+
+  /*
+   * A page served over HTTPS cannot open an insecure socket — the browser
+   * blocks it as mixed content. Catching it here explains why, rather than
+   * leaving an unexplained connection failure in the console.
+   */
+  const insecure = parsed.protocol === 'ws:' || parsed.protocol === 'http:'
+  if (insecure && typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    return 'This page is served over HTTPS, so the browser will block an insecure ws:// socket. Use wss://.'
+  }
+
+  return null
 }
 
 export function useStudioSettings(): UseStudioSettings {
@@ -51,6 +96,8 @@ export function useStudioSettings(): UseStudioSettings {
   const setShowSafeAreas = useSettingsStore((state) => state.setShowSafeAreas)
   const setReducedMotion = useSettingsStore((state) => state.setReducedMotion)
   const setIceServerUrls = useSettingsStore((state) => state.setIceServerUrls)
+  const setSignalingTransport = useSettingsStore((state) => state.setSignalingTransport)
+  const setSignalingServerUrl = useSettingsStore((state) => state.setSignalingServerUrl)
   const reset = useSettingsStore((state) => state.reset)
 
   const sources = useSourceStore((state) => state.sources)
@@ -133,6 +180,8 @@ export function useStudioSettings(): UseStudioSettings {
     return list
   }, [canvasSize.height, canvasSize.width, settings.output.frameRate, settings.previewFrameRate, sources])
 
+  const signalingConfigError = useMemo(() => validateSignalingConfig(settings), [settings])
+
   const setAspectRatio = useCallback(
     (aspectRatio: AspectRatioId) => setOutput({ aspectRatio }),
     [setOutput],
@@ -159,6 +208,9 @@ export function useStudioSettings(): UseStudioSettings {
     setShowSafeAreas,
     setReducedMotion,
     setIceServerUrls,
+    setSignalingTransport,
+    setSignalingServerUrl,
+    signalingConfigError,
     reset,
   }
 }

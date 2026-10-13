@@ -25,6 +25,8 @@ type SettingsState = {
   setPreviewFrameRate: (fps: FrameRateId) => void
   setMonitorProgramAudio: (enabled: boolean) => void
   setIceServerUrls: (urls: string[]) => void
+  setSignalingTransport: (transport: 'manual' | 'server') => void
+  setSignalingServerUrl: (url: string) => void
   reset: () => void
 }
 
@@ -66,6 +68,12 @@ export const useSettingsStore = create<SettingsState>()(
       setIceServerUrls: (iceServerUrls) =>
         set((state) => ({ settings: { ...state.settings, iceServerUrls } })),
 
+      setSignalingTransport: (signalingTransport) =>
+        set((state) => ({ settings: { ...state.settings, signalingTransport } })),
+
+      setSignalingServerUrl: (signalingServerUrl) =>
+        set((state) => ({ settings: { ...state.settings, signalingServerUrl } })),
+
       reset: () => set((state) => ({ settings: DEFAULT_SETTINGS, revision: state.revision + 1 })),
     }),
     {
@@ -73,7 +81,26 @@ export const useSettingsStore = create<SettingsState>()(
       storage: createJSONStorage(() => createSafeStorage()),
       // Only `settings` is persisted; `revision` is a render-scheduling detail.
       partialize: (state) => ({ settings: state.settings }),
-      version: 1,
+      version: 2,
+      /**
+       * v1 → v2: room-based signaling became the default.
+       *
+       * A v1 install persisted `signalingTransport: 'manual'` because that was
+       * the only default, not because the operator chose it. Carrying that
+       * forward would leave every existing browser on the copy-a-link flow with
+       * no indication that the room flow now exists, so the old default is
+       * migrated to the new one. Anyone who genuinely wants manual still has
+       * the setting, and this runs once.
+       */
+      migrate: (persisted, version) => {
+        if (version >= 2) return persisted
+        const state = persisted as { settings?: Partial<StudioSettings> } | undefined
+        if (!state?.settings) return persisted
+        return {
+          ...state,
+          settings: { ...state.settings, signalingTransport: 'server' as const },
+        }
+      },
       // Merge rather than replace, so a settings key added in a later version
       // gets its default instead of becoming undefined.
       merge: (persisted, current) => {

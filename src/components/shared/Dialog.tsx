@@ -137,8 +137,8 @@ export function Dialog({
             exit={{ opacity: 0, scale: reducedMotion ? 1 : 0.98, y: 0 }}
             transition={{ duration: reducedMotion ? 0 : 0.18, ease: 'easeOut' }}
             className={cn(
-              'relative flex max-h-[90vh] w-full flex-col overflow-hidden rounded-xl',
-              'border border-deck-600 bg-deck-850 shadow-2xl outline-none',
+              'relative flex max-h-[90vh] w-full flex-col overflow-hidden rounded-sm',
+              'border border-deck-600 bg-deck-900 shadow-2xl outline-none',
               SIZES[size],
             )}
           >

@@ -1,13 +1,30 @@
 # LiveDeck Studio
 
-A video production studio that runs in the browser. Combine camera, screen share
-and guest feeds into composed scenes, mix the audio, switch layouts live, and
-record the finished production — with no installation and **no backend**.
+A video production studio that runs in the browser. Bring in camera, screen
+share and remote guests, compose them into scenes, mix the audio, switch layouts
+live, and record the finished program — with no installation and no accounts.
 
-This is a production *switcher*, not a video calling app. The distinction is the
-whole point: sources are arranged on a logical canvas, scenes are saved
-compositions you cut between, audio runs through a real mixer, and what gets
-recorded is the composed program output.
+The joining workflow follows a **meeting tool**: you open a control room, copy
+one room link, and send it. Whoever opens it sets a name, clicks **Join room**,
+and appears in your control room — nothing to paste back. Introducing the two
+sides needs a signaling relay, which ships in [`server/`](server/) and is the
+default.
+
+Everything *except* joining works with no backend at all, and a
+zero-infrastructure joining path is still supported: in **Manual** mode the
+invite link carries the connection details itself. See
+[Signaling transports](#signaling-transports).
+
+The production engine underneath follows **OBS**: a logical canvas, saved scenes
+you cut between, a real audio mixer, and a recorder that captures the composed
+program output.
+
+```
+/director/:room        the control room — guests, scenes, mixer, recorder
+/push/:room            a guest's sender: camera + microphone, nothing else
+/scene/:room           a clean program output, for capturing in OBS
+/solo/:room/:sourceId  one feed, clean, no composition
+```
 
 ```
 Camera / Screen / Guest sources
@@ -46,6 +63,10 @@ Camera / Screen / Guest sources
 - [Quick start](#quick-start)
 - [Scripts](#scripts)
 - [Browser requirements](#browser-requirements)
+- [Rooms and roles](#rooms-and-roles)
+- [Invite links (Manual mode)](#invite-links-manual-mode)
+- [URL parameters](#url-parameters)
+- [Director controls](#director-controls)
 - [Operation modes](#operation-modes)
 - [Architecture](#architecture)
 - [The source model](#the-source-model)
@@ -57,6 +78,7 @@ Camera / Screen / Guest sources
 - [The audio graph](#the-audio-graph)
 - [The recording pipeline](#the-recording-pipeline)
 - [WebRTC and signaling](#webrtc-and-signaling)
+- [Signaling transports](#signaling-transports)
 - [Persistence](#persistence)
 - [Performance decisions](#performance-decisions)
 - [Accessibility](#accessibility)
@@ -72,18 +94,35 @@ Camera / Screen / Guest sources
 
 ```bash
 npm install
-npm run dev          # http://localhost:5173
+npm run dev                            # studio  -> http://localhost:5173
+
+# in a second terminal — needed for guests to join by room link
+npm install --prefix server
+npm --prefix server run dev            # relay   -> http://localhost:3001
 ```
 
-Open the lobby, name a production, and click **Create session**. Then start your
-camera from the Capture panel.
+Name a room (or click **New code**) and click **Open director**. Start your
+camera from the Sources tab, then copy the room link from the Guests tab and
+send it. Your guest opens it, types a name, clicks **Join room**, and appears in
+your control room.
+
+Without the relay running, the Guests panel says so plainly and points at
+Settings › Signaling › **Manual** — which needs nothing running, at the cost of
+one link per guest and a reply to paste back.
 
 Media capture requires a **secure context**. `localhost` counts as one, so plain
 HTTP works in development. Deploying over `http://` to any other host will stop
 `getUserMedia` from working at all — the app detects this and says so rather
 than blaming permissions.
 
-There are no environment variables, no API keys and no server to run.
+There are no API keys and no accounts. Environment variables are all optional —
+see [`.env.example`](.env.example) for the studio (relay address, TURN servers)
+and [`server/.env.example`](server/.env.example) for the relay (port, allowed
+origins).
+
+**Media never touches a server.** The relay forwards the text of the handshake
+and nothing else; audio and video go directly between browsers in both
+transports.
 
 ## Scripts
 
@@ -135,27 +174,202 @@ composition, mixing and recording; Safari records MP4/H.264 rather than WebM
 
 ---
 
+## Rooms and roles
+
+A **room** is just a name. A **role** is a URL, and the role decides what the
+page *is* — not what it shows. A push view has no mixer and no recorder; a scene
+view has no interface at all.
+
+| Route | Role | What it is |
+| --- | --- | --- |
+| `/director/:room` | Director | The control room: guest tiles, scenes, mixer, recorder, invite links |
+| `/push/:room` | Guest | A sender — camera and microphone, and the one link to send back |
+| `/scene/:room` | Scene output | The composed program with zero chrome, at the logical canvas size |
+| `/solo/:room/:sourceId` | Solo | One feed, uncomposed, for a downstream tool to lay out itself |
+
+Navigating to a room creates it; there is no separate "new project" step.
+
+### Joining a room
+
+With the relay running — the default — a room name **is** enough to connect: the
+guest opens `/push/:room`, sets a display name, and clicks **Join room**. Only
+the director offers; if both sides offered on sight they would glare and produce
+two half-negotiated peers with no media.
+
+Joining is a deliberate click rather than something that happens on page load,
+for one reason: a guest's camera and microphone should not enter someone else's
+production because they opened a URL. Capture starts with that click too, which
+is also the user gesture browsers require before an `AudioContext` will run.
+
+In **Manual** mode there is no server to match peers, so a room name alone
+cannot connect anybody — the invite link establishes the connection instead,
+and the guest page shows no join control because there is nothing to join.
+
+### A room name is not access control
+
+A room name authenticates nothing and authorizes nothing. With the relay
+running this has teeth: anyone who can reach it and guesses the name **will**
+join that room and be offered a connection. There is no account, no token and
+no access check — none of which could exist without a backend that owns
+identity, which this is not. The UI says so wherever a room name appears.
+
+### The scene route is the OBS integration
+
+`/scene/:room` renders the program output and literally nothing else — no
+header, no controls, no cursor, because anything there would be captured. Open
+it in a second window and point a window-capture source at it. A short hint
+appears for a few seconds for whoever opened it directly, then is removed from
+the DOM entirely so it can never land in a recording.
+
+**The control room sends it the program.** This is not an optimisation: a
+`MediaStream` belongs to the context that created it, and streams are never
+persisted, so a second window loading the same saved scenes gets source
+definitions with no media attached — a black output with every live source
+missing. Instead the director publishes the composed canvas plus the mixed
+audio over a **loopback RTCPeerConnection**, handshaken through a
+`BroadcastChannel`. No server, no STUN, nothing leaves the machine; both ends
+are the same browser, so host candidates always pair.
+
+So the scene window shows the *actual* program pixels — camera, screen share,
+guests, transitions and all. The audio track is carried too, but the element is
+muted: a second unmuted playout of a live microphone in another window is an
+acoustic feedback loop, and the control room already decides whether to monitor.
+
+With no control room open there is nothing to mirror, so it falls back to its
+own compositor — which still draws everything serializable, like colour
+backgrounds, text and the scene layout — and the hint says plainly that live
+sources need the control room.
+
+## Invite links (Manual mode)
+
+Everything in this section describes the **Manual** transport — the
+zero-infrastructure path. With the relay there is one reusable room link with no
+payload in it, so none of this applies.
+
+With no server to match peers by room, the link **carries the offer itself**:
+
+```
+https://host/push/sunday-service#i=LD1z:q1Z2…
+                └─ role ┘└─ room ┘└─ the offer ┘
+```
+
+No guest name is baked in. A name in a link is wrong the moment it is
+forwarded, and guests name themselves on the join screen — so the director
+never types it in either transport.
+
+The guest opens it, their browser already has everything it needs, and it
+answers automatically. They get one link back for the director to apply.
+
+Three decisions worth stating:
+
+- **The payload is in the fragment, after `#`.** Fragments are never sent to a
+  server — not in the request line, not in logs, not in a `Referer`. So even on
+  someone else's static host, the offer never reaches them. A query string would
+  leak it into access logs.
+- **It is DEFLATE-compressed** via `CompressionStream`, because an SDP with a
+  full candidate set runs to several kilobytes and base64 adds a third on top.
+  SDP is extremely repetitive, so this typically takes 60–75% off. Browsers
+  without the API fall back to uncompressed transparently.
+- **The fragment is cleared once consumed**, with `replaceState`, so a reload
+  cannot re-apply a stale offer and it is not reachable with the back button.
+
+A pasted answer is accepted as a full link, a bare token, or raw JSON, because
+people paste all three. Each failure mode gets its own message: a truncated
+link, an answer pasted where an invite belongs, or text that is not a LiveDeck
+payload at all.
+
+### Still one manual step
+
+The guest's answer has to come back by hand — no server can carry it. It is
+presented as a link they can send rather than a blob to paste into the right
+box, but it is a step, and the UI does not pretend otherwise.
+
+## URL parameters
+
+Configuring a session through the link, as VDO.Ninja does. Every parameter below
+does something real; unrecognised keys are **reported in the view** rather than
+silently ignored, so a typo surfaces.
+
+| Parameter | Value | Effect |
+| --- | --- | --- |
+| `&label=` `&name=` | text | Display name for the participant |
+| `&muted` `&mute` | flag | Join with the microphone track disabled |
+| `&novideo` | flag | Do not request a camera at all |
+| `&noaudio` | flag | Do not request a microphone at all |
+| `&quality=` | 480 \| 720 \| 1080 | Short-edge resolution for capture and output |
+| `&fps=` `&framerate=` | 24 \| 30 \| 60 | Frame rate for capture and recording |
+| `&ratio=` `&aspect=` | 16:9 \| 9:16 \| 1:1 \| 4:3 | Program canvas aspect ratio |
+| `&cleanoutput` `&clean` | flag | Hide every interface element |
+| `&mirror` | flag | Mirror the local camera preview |
+| `&autostart` `&autojoin` | flag | Request the camera immediately on load |
+| `&scene=` | number | Which scene to show on load, 0-based |
+
+Flags work bare (`&muted`) or with a value (`&muted=false`). The in-app cheat
+sheet is generated from the parser's own list, so a parameter cannot be
+documented without being implemented, or vice versa.
+
+`&autostart` starts the *camera* only. Audio still needs a click, because
+browsers will not start an `AudioContext` without a user gesture — promising
+otherwise would just produce a silent guest.
+
+## Director controls
+
+A VDO.Ninja director genuinely mutes a guest, rather than just dropping them
+from their own monitor. That needs a second path alongside the media, so each
+peer connection carries an `RTCDataChannel` running a small typed protocol.
+
+The two kinds of control are separated everywhere, in the code and on screen:
+
+| | Travels | Effect | Can it fail? |
+| --- | --- | --- | --- |
+| **Remote** — mute mic, mute camera, cue, on-air tally | Data channel | Changes the guest's **own tracks** (`track.enabled = false`) | Yes — the channel may not be open, so each command returns a result and the UI reports failure |
+| **Local** — mute in mix, hide video, solo | Nothing | This machine's program output only | No — but the guest is never told |
+
+Conflating them would mean telling an operator they had silenced someone when
+they had only silenced their own speakers.
+
+Supporting details:
+
+- The guest **reports its real track state back**, read off the tracks rather
+  than from a local boolean. So the control room shows what the guest's hardware
+  is doing, and a guest unmuting themselves is visible upstream.
+- Remote controls are **disabled with an explanation** when the channel is not
+  open, rather than appearing to work.
+- Every inbound message is **structurally validated** before it can touch a
+  `MediaStreamTrack`. Payloads are remote input from a peer that could send
+  anything; `muted: "true"` is rejected rather than coerced, cue text is
+  length-bounded, and unknown types are dropped.
+- The channel is **ordered and reliable**: an out-of-order "unmute" arriving
+  before a "mute" would leave a guest muted with the director's UI disagreeing.
+- A 5-second heartbeat measures control latency and detects a dead channel. It
+  is torn down with the channel, so a closed peer never leaves a timer running.
+- **Solo** is a reversible edit to the active scene — the soloed item is fitted
+  to the canvas and brought to the front, everything else is hidden, and exiting
+  restores the exact prior state from a snapshot. An item that was *already*
+  hidden stays hidden. Doing it this way means solo is visible in the scene, is
+  recorded like any other change, and needs no special case in the renderer.
+
+---
+
 ## Operation modes
 
 The two modes are genuinely different, and the UI never blurs them.
 
-### Local Studio Mode (default)
+### Local Studio Mode
 
 Everything runs on your device: capture, composition, mixing, recording.
 **No signaling server, no network dependency of any kind.**
 
-Guests in this mode are *simulated*: an animated canvas plus a generated tone,
-wrapped in a real `MediaStream`. They travel the exact same path as a remote
-peer — stream registry, compositor, mixer, recorder — which is what makes the
-demo exercise the real pipeline rather than a mock. They are labelled
-"Simulated" everywhere, and the word `SIMULATED FEED` is burned into their video
-pixels so it survives into a downloaded recording.
+This is the whole production pipeline minus the guests — camera, screen share,
+microphone, images, video, text and colour sources, composed into scenes, mixed,
+and recorded to a file. Nothing here needs a second participant.
 
 ### Peer Connection Mode
 
-Real browser-to-browser media over WebRTC, using **manual signaling**: you copy
-a connection code from one browser and paste it into the other. See
-[WebRTC and signaling](#webrtc-and-signaling) for the workflow and its real
+Real browser-to-browser media over WebRTC. Guests join by room link with the
+relay running, or through the
+[invite-link workflow](#invite-links-manual-mode) in Manual mode. See
+[WebRTC and signaling](#webrtc-and-signaling) for the ICE details and the real
 limitations.
 
 There is deliberately **no mock signaling adapter that pretends to connect two
@@ -191,15 +405,14 @@ media logic.
 | `studioStore` | Session metadata, capture status, UI state (selection, panels, dialogs, drag) | Session only |
 | `sourceStore` | Source definitions | Yes (stream refs stripped) |
 | `sceneStore` | Scenes, items, transforms, active scene, live transition | Yes (transition is not) |
-| `guestStore` | Guest identity, **separately** peer state and peer stats | Identity only |
+| `guestStore` | Guest identity, **separately** peer transport state, peer stats and control-channel state | Identity only |
 | `audioStore` | Mixer channel configuration | Yes (monitoring forced off) |
 | `recordingStore` | Recorder status, library metadata | Metadata in IndexedDB |
 | `settingsStore` | Output quality, editor and accessibility preferences | Yes |
-| `simulationStore` | Demo flags, injected-event log | No |
 
-Four categories of state are deliberately kept apart: **persistent
+Three categories of state are deliberately kept apart: **persistent
 configuration**, **ephemeral session state** (live streams, connections, active
-recording), **UI state**, and **simulation state**.
+recording), and **UI state**.
 
 Zustand selectors are used throughout so a telemetry tick, a timer, or an audio
 meter never re-renders the whole studio.
@@ -221,7 +434,6 @@ type MediaSource = {
   settings: SourceSettings   // discriminated union, type-specific, serializable
   streamKey: string | null   // index into the StreamRegistry — never a MediaStream
   volume: number
-  simulated: boolean
   createdAt: number
 }
 ```
@@ -511,8 +723,11 @@ saved.
 
 ```
 PeerConnectionManager   owns RTCPeerConnection lifecycle; no UI, no store, no transport
+ControlChannel          the director ↔ guest command path (RTCDataChannel)
 SignalingAdapter        the transport seam (interface)
-  └─ ManualSignalingAdapter    copy & paste
+  ├─ ManualSignalingAdapter       out-of-band exchange, no infrastructure (default)
+  └─ WebSocketSignalingAdapter    rooms + trickle ICE via the optional relay
+invite-link             encodes an envelope into a shareable URL fragment
 ICE configuration       STUN/TURN parsing, gathering, connectivity assessment
 Remote media handler    binds incoming tracks to guest sources
 Connection diagnostics  real getStats() output
@@ -520,27 +735,50 @@ Connection diagnostics  real getStats() output
 
 Every transport that could ever be used — manual exchange, a WebSocket service,
 a QR code, `BroadcastChannel` between tabs — implements one `SignalingAdapter`
-interface. The studio UI and the peer manager know only about that type, so a
-networked adapter can be added later without touching either.
+interface. The studio UI and the peer manager know only about that type, plus
+the capability flags it advertises:
 
-### The manual workflow
+| Flag | Meaning |
+| --- | --- |
+| `crossDevice` | Can reach a genuinely separate device |
+| `requiresManualExchange` | A human has to carry the handshake |
+| `supportsRooms` | Peers find each other by name |
+| `supportsTrickleIce` | Candidates can be sent incrementally |
+
+The UI reads these rather than checking which adapter is installed, which is
+why switching transports changes the Guests panel from the copy-a-link flow to
+a room status view instead of leaving dead controls on screen.
+
+### The workflow
 
 ```
-Host creates offer → ICE gathering completes → host copies the code
+Director creates offer → ICE gathering completes → link generated
        ↓
-Guest pastes it → guest creates answer → guest copies the code
+Guest opens the link → offer applied automatically → answers → gets a link back
        ↓
-Host pastes the answer → ICE connectivity checks → connected
+Director applies the answer → ICE connectivity checks → connected
+       ↓
+Control channel opens → remote mute, cue and on-air tally become available
 ```
+
+The data channel is created by the **offering** side, so its m-line is in the
+offer and no second negotiation round is needed — which this signaling could not
+perform without another link exchange.
 
 ### Vanilla ICE, and why
 
-Manual exchange has **no channel for incremental (trickle) ICE candidates** —
-the user would have to copy a fresh code every time one appeared. So LiveDeck
-waits for gathering to complete and exports a single SDP with every candidate
-already embedded.
+This applies to the **manual** transport only. Manual exchange has **no channel
+for incremental (trickle) ICE candidates** — the user would have to copy a fresh
+code every time one appeared. So LiveDeck waits for gathering to complete and
+exports a single SDP with every candidate already embedded.
 
-The trade-offs, which the UI states before you invest in the flow:
+The server transport does not have this constraint: a live socket can carry
+candidates as they are discovered, so `WebSocketSignalingAdapter` advertises
+`supportsTrickleIce` and the peer manager sends each one immediately. Inbound
+candidates that arrive before `setRemoteDescription` are buffered and flushed
+after it, since applying one to a connection with no remote description throws.
+
+The trade-offs of the vanilla path, which the UI states before you invest in it:
 
 - Setup is slower — a second or two spent gathering.
 - Gathering **times out after 5s** rather than hanging, because a
@@ -553,7 +791,9 @@ The trade-offs, which the UI states before you invest in the flow:
   real network limitation, not a bug, and traversing it requires a TURN server —
   which would mean running infrastructure this project deliberately does not
   have. Add your own in **Settings → ICE servers** using
-  `turn:host:port|username:password`.
+  `turn:host:port|username:password`. This one is **not** solved by the
+  signaling server: media is peer-to-peer in both transports, so the same NAT
+  limits apply.
 
 After gathering, the candidate set is assessed and reported in plain language:
 relay present → good; public (srflx) present → works on most home and office
@@ -571,8 +811,8 @@ existing in the list says nothing about whether a connection succeeded.**
 
 - `disconnected` is reported as *reconnecting*, not failed — ICE often recovers.
 - `failed` explains itself in terms of NAT and firewalls.
-- Simulated guests have no transport, so diagnostics reports "simulated — no
-  peer connection" instead of inventing RTT and bitrate numbers.
+- A guest with no peer yet reports exactly that, and diagnostics renders every
+  unavailable metric as an em dash instead of inventing RTT and bitrate numbers.
 
 Connection codes are untrusted clipboard input and are validated structurally
 before anything reaches `setRemoteDescription`: wrong version, truncated SDP
@@ -598,6 +838,119 @@ against. Knowing an ID grants no access to anybody's media; media only ever flow
 over a peer connection both sides explicitly completed. The UI says this wherever
 an ID appears.
 
+## Signaling transports
+
+Two transports ship. The choice is in **Settings → Signaling**, and it changes
+only *how the two sides find each other* — media is peer-to-peer either way, and
+no server ever sees a frame of video.
+
+| | Signaling server (default) | Manual |
+| --- | --- | --- |
+| Infrastructure | A Node process you run | None |
+| Guest joins by | Opening the room link and clicking Join | Opening a link that carries the offer |
+| The link | One, reusable, short | One per guest, a few kilobytes |
+| Answer comes back | Automatically | By hand |
+| ICE | Trickle — candidates stream | Vanilla — gathers fully first |
+| Time to connect | Typically under a second | A second or two of gathering, plus the human round-trip |
+| Works on static hosting | No — needs the relay reachable | Yes |
+
+**Manual remains fully supported**, and is one setting away in
+Settings › Signaling. The original constraint of this project was to need no
+backend, and that path is unchanged: nothing is transmitted to anybody, because
+the offer rides in the URL fragment, which browsers never send to a server.
+
+The default changed because the manual flow has one genuinely awkward step that
+no amount of frontend cleverness removes — see below.
+
+### Why a server at all
+
+The manual flow has one genuinely awkward step: the guest's answer has to travel
+back to the director by hand (see limitation 2 below). No amount of frontend
+cleverness removes it — returning an answer requires something both parties can
+reach. The relay is that something, and nothing more.
+
+### What the relay does and does not do
+
+It does:
+
+- Keep a map of room name → connected peers, in memory only.
+- Forward `offer`, `answer` and `candidate` messages between peers **in the same
+  room**, inferring the sender from the connection rather than trusting a claim
+  in the message.
+- Announce arrivals and departures so the director knows who to offer to.
+- Rate-limit each peer, cap peers per room and rooms per server, and drop
+  sockets that stop answering heartbeats.
+
+It does not:
+
+- Touch media. Audio and video never pass through it.
+- Persist anything. There is no database; restarting it empties every room.
+- Authenticate anyone. **A room name is not a password** — see below.
+
+### Running it
+
+```bash
+cd server
+npm install
+npm run dev          # http://localhost:3001, relay on ws://localhost:3001/signal
+```
+
+That is all — the studio already points there. The address field is **blank by
+default and resolved**, not hardcoded:
+
+1. `VITE_SIGNALING_URL`, if set at build time.
+2. `ws://<hostname>:3001` when the page URL carries a port, i.e. development.
+3. The page's own origin otherwise, for a deployment behind a proxy that also
+   fronts `/signal`.
+
+Override it in **Settings → Signaling** for a relay hosted anywhere else.
+`/healthz` reports room counts and is the reliable way to confirm the relay —
+rather than some other process — is what is answering that port.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3001` | HTTP and WebSocket port |
+| `HOST` | `0.0.0.0` | Interface to bind (not `HOSTNAME` — Windows pre-sets that to the machine name) |
+| `ALLOWED_ORIGINS` | *unset* | Comma-separated origins allowed to connect |
+
+`ALLOWED_ORIGINS` is **unset by default and the server warns about it on
+startup**, because an unset allow-list accepts connections from any page on the
+internet. That is convenient on a laptop and wrong anywhere else.
+
+The wire protocol lives in [`shared/signaling-protocol.ts`](shared/signaling-protocol.ts),
+imported by both the browser client and the server so the two cannot drift. Both
+sides validate every message; the server is untrusted input to the client just as
+much as the reverse.
+
+### It will not run on Vercel's serverless runtime
+
+This is worth stating plainly because the stack suggests otherwise. A WebSocket
+relay needs a long-lived process holding connections in memory. Serverless
+functions are short-lived and individually isolated, and a Next.js route handler
+cannot access the HTTP server's `upgrade` event at all — which is why
+[`server/src/server.ts`](server/src/server.ts) starts Next *programmatically*
+inside a plain Node `http` server that owns that event itself.
+
+So it needs somewhere that runs a persistent process: a VPS, a container, Fly.io,
+Railway, a Node host. The static studio can still be deployed anywhere; only the
+relay has this requirement.
+
+Scaling past one process would need shared room state (Redis, say) and sticky
+sessions. That is out of scope here, and the in-memory limits are small enough
+to be honest about: 12 peers per room, 500 rooms.
+
+### A room name is not a password
+
+Restating what [Rooms and roles](#a-room-name-is-not-access-control) says,
+because with a relay in play it has more teeth: anyone who can reach it and
+guesses a room name **will** join that room and be offered a connection.
+
+Treat the room name as a rendezvous label, not a credential. **New code** on the
+landing page generates one in the `abc-defg-hij` shape meeting tools use —
+roughly 47 bits, which makes it impractical to guess, but that is obscurity, not
+access control. If it matters, run the relay on a network you control and set
+`ALLOWED_ORIGINS`. The UI states this wherever a room name is shown.
+
 ## Persistence
 
 | What | Where | Why |
@@ -610,8 +963,7 @@ an ID appears.
 `AudioNode`s and `RTCPeerConnection`s are never written — they cannot be, and
 they would be meaningless after a reload. On save, `streamKey` is nulled and
 peer bindings cleared; capture is re-acquired after a reload, with a fresh
-permission prompt if the browser requires one. Simulated sources and guests are
-dropped on save, because a generated feed cannot be restored from a definition.
+permission prompt if the browser requires one.
 
 Documents are keyed by session id, so reopening a session restores *that*
 production rather than whatever was edited last. Autosave is debounced at 600ms
@@ -638,9 +990,10 @@ not remember anything.
   silently degraded.
 - **Pointer capture** on `window` keeps gestures alive past the canvas edge and
   guarantees the up handler fires, so a drag can never get stuck on.
-- **Lazy loading**: the studio is split from the lobby, and diagnostics plus
-  every dialog are separate chunks fetched on first use. Initial JS is ~138kB
-  gzipped.
+- **Lazy loading is per role.** Each role view is its own chunk, so a guest
+  opening an invite link downloads ~4kB gzipped — not the mixer, recorder or
+  scene editor, none of which their page can use. Diagnostics and every dialog
+  split out again on first use.
 - **Decoded assets are cached** per source rather than re-decoded per frame.
 - **Device switches use `applyConstraints`** on the live track first, falling
   back to a full re-acquire only if the browser rejects it — avoiding a visible
@@ -684,14 +1037,21 @@ similarly for frame rate. The studio does not promise quality it cannot deliver.
 
 ## Testing strategy
 
-320 unit and integration tests (Vitest + React Testing Library) plus four
-Playwright browser scenarios.
+468 unit and integration tests (Vitest + React Testing Library) plus 35
+Playwright browser tests across six scenarios.
 
 ```bash
 npm test                 # unit + integration
 npm run test:coverage    # with coverage
 npm run e2e:install      # once — downloads Chromium
 npm run e2e              # browser scenarios
+```
+
+The browser suite starts both the studio and the relay. If port 3001 is already
+taken by something else, point both at a free one:
+
+```bash
+LIVEDECK_RELAY_PORT=3100 npm run e2e
 ```
 
 ### What is tested where, and why
@@ -701,17 +1061,23 @@ resolution, snapping, gesture math for drag/resize/rotate/crop including rotated
 and aspect-locked cases, audio math (RMS, dB, meter curves, gain resolution),
 composition model resolution and layer ordering, transition progress, canvas
 size derivation, format negotiation, signaling payload validation, ICE
-connectivity assessment.
+connectivity assessment, invite-link encode/decode round trips, URL parameter
+parsing, and control-message validation.
 
 **Stores**: scene creation/deletion/duplication/switching, item ordering and
 dense relayering, hydration including stale references, source lifecycle.
 
 **Services with scripted doubles**: the stream registry's reference-counting
 invariant (including the "delete the duplicate, original keeps running" case),
-recorder state transitions, peer connection state reporting.
+recorder state transitions, peer connection state reporting, and the control
+channel — that a command is only *claimed* delivered when the channel is open,
+that hostile payloads are dropped, and that the heartbeat never outlives the
+channel.
 
 **Integration through hooks**: source lifecycle with real store wiring — stream
-release on delete, shared captures on duplicate, scene and mixer cleanup.
+release on delete, shared captures on duplicate, scene and mixer cleanup — and
+solo's reversibility, including that an already-hidden item is not revealed on
+exit.
 
 **Components**: scene switching changes `activeSceneId` (the value the
 compositor reads) rather than only highlighting a card; the properties panel's
@@ -733,19 +1099,46 @@ is the production one. The browser tests assert on real pipeline state — canva
 backing-store dimensions, sampled canvas pixels, track `readyState`, registered
 stream counts, compositor frame counts — not just on rendered labels.
 
-The four scenarios: **A** local studio (devices → sources → scene → arrange →
+The six scenarios: **A** local studio (devices → sources → scene → arrange →
 switch → record → preview → download, including that the blob is decodable by
 the browser's own player and the filename extension matches the real MIME type);
 **B** source composition (camera over screen share, transforms, layer order,
 hide, record across a scene switch); **C** resource cleanup (delete releases the
 stream, duplicate-then-delete keeps the original alive, recording releases its
-capture, ending a session stops every track, repeated start/stop cycles do not
-accumulate streams, config survives a reload but capture does not); **D** peer
-mode (offer contains gathered candidates, malformed and wrong-direction codes
-are rejected specifically, and a full handshake between two browser contexts).
+capture, leaving a room stops every track, repeated start/stop cycles do not
+accumulate streams, config survives a reload but capture does not); **D** invite
+links and peers (Manual mode); **E** room joining (the default), including the
+participant lifecycle — leaving removes a guest, and rejoining or reloading does
+not duplicate them; **F** the scene window, which asserts that the mirrored
+program really decodes *moving* frames rather than showing a single stuck
+image.
 
-Even scenario D has a limit worth stating: both contexts run on one machine, so
-host candidates always match and the connection always succeeds. It verifies the
+Scenario D is worth describing in full, because it exercises the parts that are
+easiest to fake. It asserts that the generated link's **fragment really contains
+gathered ICE candidates** (decoding and inflating it in the browser to check),
+that a wrong-direction or malformed paste is named specifically, and then runs a
+complete handshake across two browser contexts: the guest *opens the link*,
+`?label=` is applied, the offer is consumed and the fragment cleared, an answer
+link appears unprompted, and both sides reach a genuine `connected` state. It
+then proves the control channel end-to-end — the director mutes the guest's
+microphone and the assertion is that the **guest's own window** flips to
+"Unmute", which can only happen if the command crossed the data channel and
+disabled their track. A cue is checked the same way. Finally it verifies the
+scene route contains **no banner, no buttons and no tablist**, and that
+`?ratio=9:16&quality=1080` really resizes the canvas to 1080×1920.
+
+Scenario E is the default path, and runs against the real relay — Playwright
+starts `server/` alongside the dev server. A guest context is given nothing but
+`/push/<room>`: it asserts the join control is present and the director's list
+is *empty* until the guest clicks it, that the name the guest typed is what
+appears in the control room, that both sides reach a genuine `connected` state,
+that no manual-exchange controls exist on either side, and that the control
+channel still crosses to the guest's own tracks. The transport is seeded through
+the persisted setting rather than clicked through Settings, because switching it
+mid-test would tear down and rebuild the adapter.
+
+Even so, a limit worth stating: both contexts run on one machine, so host
+candidates always match and the connection always succeeds. It verifies the
 workflow and the state machine, **not** NAT traversal. Cross-network
 connectivity cannot be proven from a test runner on a single host and needs
 manual two-device testing.
@@ -756,9 +1149,19 @@ Collected honestly in one place.
 
 1. **STUN-only means some peer connections will fail.** Symmetric NAT or
    UDP-blocking firewalls need a TURN relay, which this project does not host.
-   The studio reports `failed` rather than faking a connected state.
-2. **Manual signaling cannot be automatic.** There is no server, so there is no
-   invite link that "just connects". Codes are carried by hand.
+   **This is the most common cause of "connection failed", and the signaling
+   server does not fix it** — media is peer-to-peer in both transports, so the
+   same NAT limits apply either way. Add a TURN server under
+   Settings › ICE servers as `turn:host:port|username:password`, or set
+   `VITE_TURN_URLS` to bake one in for every device. The studio reports `failed`,
+   and says which of the three cases it was (relay present and still failed,
+   public address only, or host candidates only), rather than faking a connected
+   state.
+2. **In Manual mode, an invite link gets you most of the way, not all of it.**
+   The link carries the offer, so the guest needs no setup — but their answer
+   still has to come back by hand, because no server can carry it. This is why
+   the relay is the default; it is also why Manual still exists, for installs
+   that cannot run one. See [Signaling transports](#signaling-transports).
 3. **Screen capture targets are chosen by the browser, not the app.** Which
    screens, windows and tabs you may pick is entirely the browser's native
    picker. The app cannot enumerate or pre-select a target, and can only read
@@ -777,21 +1180,46 @@ Collected honestly in one place.
    missing. The control is disabled with an explanation.
 8. **Large recordings may exceed the storage quota.** They stay downloadable for
    the session and are marked "Not stored".
-9. **Simulated guests are not remote participants.** They are generated locally
-   and labelled as such, including a watermark burned into their video.
-10. **Precise drag editing is impractical on small screens.** The mobile layout
-    keeps the preview and recording status visible and points to the numeric
-    controls, rather than pretending touch dragging on a 360px-wide canvas is
-    equivalent.
-11. **Local image and video files are capped at 40MB** and held in memory for
+9. **Precise drag editing is impractical on small screens.** The mobile layout
+   keeps the preview and recording status visible and points to the numeric
+   controls, rather than pretending touch dragging on a 360px-wide canvas is
+   equivalent.
+10. **Local image and video files are capped at 40MB** and held in memory for
     the session, since they are read as data URLs.
+11. **Invite links are long** — a few kilobytes even compressed, because they
+    contain a full SDP. They paste fine into chat and email, but they are not
+    pretty, and some SMS clients will break them across lines.
+12. **A scene window mirrors the control room, so it depends on it.** The
+    program is sent to it over a loopback peer connection, because a
+    `MediaStream` cannot cross a browsing context — so closing the control room
+    stops the mirror, and the scene window says so rather than freezing on the
+    last frame. With no control room open it falls back to its own compositor,
+    which can draw the saved scene layout but none of the live sources. It is
+    not an independent process.
+13. **Remote control needs an open data channel.** Before a peer connects only
+    the local controls apply — the UI disables the remote ones rather than
+    pretending.
+14. **The signaling server is not serverless-deployable.** It holds WebSocket
+    connections and room state in one process's memory, so it needs a
+    persistent host — not Vercel functions — and it does not scale past a single
+    instance without shared state. Limits are 12 peers per room and 500 rooms.
+15. **A room name is not access control, in either transport.** With the relay
+    running, anyone who can reach it and guesses the name joins the room. There
+    is no authentication anywhere in this project, and adding real accounts
+    would mean a backend that owns identity.
+16. **Room joining requires the relay to be running.** It is the default
+    transport, so a fresh install with nothing on port 3001 reports "Could not
+    reach the signaling server" and no guest can join until it is up or
+    Signaling is switched to Manual. The studio cannot fall back silently:
+    quietly demoting rooms to the copy-a-link flow is how "guests just don't
+    appear" happens.
 
 ## Guided demonstration
 
 Reproduces the full production workflow in about three minutes.
 
-1. Open the app and **create a session** named "Demo".
-2. **Start camera** in the Capture panel. The preview appears in the program
+1. Open the app, type the room name "demo", and click **Open director**.
+2. In the **Sources** tab, **start camera**. The preview appears in the program
    canvas; the status reads *Active* only once a live track exists.
 3. **Start microphone**. A mixer channel appears with a live meter — speak and
    watch it move.
@@ -807,24 +1235,37 @@ Reproduces the full production workflow in about three minutes.
    screen side-by-side, and set its transition to **Crossfade, 400ms**.
 8. **Switch between the scenes.** Watch the program canvas actually dissolve —
    the output changes, not just the highlighted card.
-9. In the demo panel, **Add a simulated guest feed**. It appears as a real source
-   with a moving frame counter, marked *Simulated*, with its own mixer channel.
-10. Pull the **host mic fader** down and the guest fader up.
-11. **Start recording**. The ON AIR tally lights and the timer runs.
-12. **Switch scenes while recording**, move the camera, hide a source, adjust a
+9. In **Mix & record**, pull the host mic fader down. Each live audio source
+   has its own channel with a pre-fader meter.
+10. **Start recording**. The ON AIR tally lights and the timer runs.
+11. **Switch scenes while recording**, move the camera, hide a source, adjust a
     fader.
-13. **Stop & save**. Watch it pass through *Writing the file* before reporting
+12. **Stop & save**. Watch it pass through *Writing the file* before reporting
     *Saved to the library*.
-14. Open the **recording library**, **Preview** the result, and confirm the
+13. Open the **recording library**, **Preview** the result, and confirm the
     scene switches, the transforms, the hidden source and the fader moves are
     all in the file. Then **Download** it.
-15. Open **Diagnostics** to see real compositor frame rate, live track states
+14. Open **Diagnostics** to see real compositor frame rate, live track states
     and stream reference counts.
 
-Optional peer demonstration: switch to **Peer Connection**, open **Connect a
-real guest**, create an offer, and paste the code into a second browser (a
-different profile, or another device on the same network). The guest produces an
-answer; paste it back. Both sides report their real connection state throughout.
+### The room workflow
+
+15. With the relay running, open the **Guests** tab and click
+    **Copy room link**. One link, reusable, no fields to fill in.
+16. Open it in a second browser profile, or on another device on the same
+    network. Type a name and click **Join room**.
+17. The guest appears in the control room under the name *they* chose, and both
+    sides report *Connected* from their real `connectionState`. Nothing was
+    pasted anywhere.
+18. Click **Leave room** on the guest to drop the connection and return to the
+    join screen.
+19. From the guest's tile, click **Mic** under "Remote". Watch the *guest's own*
+    window flip to "Unmute" — the command crossed the data channel and disabled
+    their track, it did not just change your mix.
+20. Type a message in **Cue all** and send it. It appears as an alert on the
+    guest's page.
+21. Open the **Scene output link** from the Scenes tab in a new window — a clean
+    program feed with no interface, ready to capture in OBS.
 
 ## Troubleshooting
 
@@ -852,11 +1293,46 @@ the channel is not muted in the mixer.
 now; it will be lost on reload. Delete older recordings to free space.
 
 **Peer connection reaches `failed`** — Both sides gathered candidates but could
-not reach each other: symmetric NAT or a UDP-blocking firewall. Check the ICE
-assessment in the invite dialog. A TURN server is required; see limitation 1.
+not reach each other. The error says which case it is, because the fix differs:
+*public address found but unreachable* is symmetric NAT or a UDP-blocking
+firewall and needs a **TURN server**; *only local-network candidates* means STUN
+itself never answered; *a relay was present and it still failed* points at the
+TURN server's own credentials or reachability. Add TURN under
+Settings › ICE servers as `turn:host:port|username:password`, or set
+`VITE_TURN_URLS`. **Switching to the signaling server does not fix this** —
+media is peer-to-peer either way. See limitation 1.
 
-**"The connection code is truncated"** — Only part of the code was copied. Use
-the Copy button, or select the whole textarea.
+**"Could not reach the signaling server"** — The relay is not running, or
+something else is on its port. Start it with `npm --prefix server run dev` and
+check `http://localhost:3001/healthz` returns JSON. If that returns an HTML page
+instead, a *different* process owns the port — which fails in the most
+confusing way available, because the WebSocket connects at the TCP level and
+then never upgrades, leaving the studio in *Connecting…* indefinitely. Either
+free the port or set `VITE_SIGNALING_URL` and the relay's `PORT` to a free one.
+
+**Guests open the room link but never appear** — Check the Guests panel reports
+*Connected to the signaling server* first; that is a separate fact from any
+guest having connected. Then confirm the guest actually clicked **Join room** —
+opening the link alone announces nothing, by design. Both sides must also be on
+the same relay and the same room name.
+
+**The relay serves an unrelated page, or refuses to start** — `server/.next` is
+a build cache; a stale one from another project produces both. Delete it and
+restart. Next's dev server also holds a lock allowing only one instance per
+directory, so kill any existing one before starting a second.
+
+**"The link may have been truncated"** — Only part of the link was copied.
+Invite links are long; use the Copy button, or select the whole textarea.
+
+**Remote mute does nothing** — The control channel is not open. The buttons are
+disabled when that is the case; if they are enabled and the command still fails,
+a toast says so.
+
+**The scene window is black** — Open the director view for the same room in
+another window. The scene window is a *mirror*: live sources (camera, screen
+share, guests) exist only in the control room's tab and are sent to it, so with
+no control room open there is nothing to show and the hint says so. If the
+control room *is* open, check that its own program canvas is not empty.
 
 **Meters are flat but the device is Active** — The AudioContext is suspended.
 Click anywhere in the studio, or use *Enable audio engine*.
@@ -868,43 +1344,53 @@ recording rate is unaffected. Diagnostics shows the measured compositor rate.
 
 ```
 src/
-├── app/                  routes and pages (lobby, studio)
+├── app/                  routes and role pages (landing, director, push, scene, solo)
 ├── components/
-│   ├── layout/           session bar, studio shell (desktop + mobile)
-│   ├── studio/           program canvas, editor overlay, settings, palette
+│   ├── layout/           room bar, director control room
+│   ├── studio/           program canvas, editor overlay, settings, palette, URL help
 │   ├── sources/          source list, capture controls, properties, add-source
 │   ├── scenes/           scene strip
-│   ├── guests/           guest panel, invite / signaling workflow
+│   ├── guests/           guest tiles, invite-link panel
 │   ├── audio/            mixer, level meters
 │   ├── recording/        transport controls, library
-│   ├── diagnostics/      diagnostics panel, demo panel
+│   ├── diagnostics/      diagnostics panel
 │   └── shared/           button, panel, fields, dialog, status, toast
 ├── hooks/                one responsibility each; the only React↔service bridge
 ├── services/
 │   ├── media/            stream registry (ownership), device + capture services
 │   ├── composition/      compositor, composition model, interaction controller,
-│   │                     frame providers, asset cache
+│   │                     frame providers, asset cache, program link (the
+│   │                     scene-window mirror)
 │   ├── audio/            mixer graph, meter bus
 │   ├── recording/        recording engine, MIME negotiation
-│   ├── webrtc/           peer manager, ICE, getStats
-│   ├── signaling/        adapter interface, manual adapter, payload validation
+│   ├── webrtc/           peer manager, control channel, ICE, getStats
+│   ├── signaling/        adapter interface, manual + websocket adapters,
+│   │                     invite links, URL parameters, validation
 │   ├── sources/          source factory, default placement, stream keys
-│   ├── persistence/      localStorage, IndexedDB, documents, object URLs
-│   └── simulation/       synthetic media generation
+│   └── persistence/      localStorage, IndexedDB, documents, object URLs
 ├── stores/               zustand stores, one per domain
 ├── types/                domain types
 ├── utils/                geometry, snapping, audio math, formatting, errors, ids
 ├── lib/                  capability detection, class-name helper
 └── test/                 browser API stubs for the unit suite
-e2e/                      Playwright scenarios A–D
+e2e/                      Playwright scenarios A–F
+shared/                   the signaling wire protocol — the only code compiled by
+                          both the browser client and the server
+server/                   signaling relay (Next.js + ws). Required for guests to
+                          join by room link; everything else runs without it
+└── src/
+    ├── rooms.ts          room registry, limits, rate limiting (all the logic)
+    ├── signaling.ts      WebSocket plumbing, heartbeat, origin checks
+    └── server.ts         Node http server that owns `upgrade`, with Next inside
 ```
 
 ---
 
 ## Final note
 
-The central workflow is: **capture media → compose scenes → mix audio → switch
-layouts → record the finished production → preview and download.** The media
-pipeline was built first; the interface was built around it.
+The central workflow is: **open a room → send a link → compose scenes → mix
+audio → switch layouts → record the finished production → preview and
+download.** The media pipeline was built first; the interface was built around
+it.
 
 Where a browser cannot do something, this project says so rather than faking it.

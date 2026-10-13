@@ -1,11 +1,11 @@
-import { Copy, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ChevronRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import type { Scene, TransitionType } from '@/types/scene'
 import { cn } from '@/lib/cn'
 import { useSceneManager } from '@/hooks/useSceneManager'
 import { Button } from '@/components/shared/Button'
 import { NumberField, SelectField, TextField } from '@/components/shared/Field'
-import { Badge } from '@/components/shared/Status'
+
 
 /**
  * The scene selector.
@@ -26,26 +26,23 @@ export function SceneStrip() {
   const manager = useSceneManager()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftName, setDraftName] = useState('')
+  const [showTransition, setShowTransition] = useState(false)
 
   const activeScene = manager.activeScene
 
   return (
-    <div className="flex shrink-0 flex-col gap-2 rounded-panel border border-deck-700 bg-deck-850 p-2.5">
-      <div className="flex items-center gap-2">
-        <h2 className="text-[11px] font-semibold tracking-[0.08em] text-ink-400 uppercase">
-          Scenes
-        </h2>
-        {manager.transitioning ? <Badge tone="accent">Transitioning</Badge> : null}
-        <span className="ml-auto text-[10px] text-ink-500">
-          Page Up / Page Down to switch
-        </span>
-      </div>
-
+    <div className="flex shrink-0 flex-col gap-1.5 border border-deck-700 bg-deck-900 p-2">
+      {/*
+        No separate header row: a static keyboard hint is not worth a line of
+        vertical space taken from the program output. The heading sits inline
+        with the scene cards, and the hint moved to the tablist's title.
+      */}
       <div
         role="tablist"
         aria-label="Scenes"
         aria-orientation="horizontal"
-        className="flex gap-2 overflow-x-auto pb-1"
+        title="Page Up / Page Down, or arrow keys, to switch scenes"
+        className="flex items-stretch gap-1.5 overflow-x-auto"
         onKeyDown={(event) => {
           if (event.key === 'ArrowRight') {
             event.preventDefault()
@@ -56,6 +53,17 @@ export function SceneStrip() {
           }
         }}
       >
+        <div className="flex shrink-0 flex-col justify-center pr-1">
+          <h2 className="text-[10px] font-semibold tracking-[0.08em] text-ink-400 uppercase">
+            Scenes
+          </h2>
+          {manager.transitioning ? (
+            <span className="text-[9px] font-semibold tracking-wide text-accent-400 uppercase">
+              Mixing
+            </span>
+          ) : null}
+        </div>
+
         {manager.scenes.map((scene) => (
           <SceneCard
             key={scene.id}
@@ -79,20 +87,54 @@ export function SceneStrip() {
           />
         ))}
 
+        {/*
+          The label is abbreviated to keep the strip short, but "New" on its own
+          tells a screen reader nothing about what it creates — hence the
+          explicit accessible name.
+        */}
         <Button
           variant="outline"
+          size="sm"
+          aria-label="New scene"
           onClick={() => manager.createScene()}
-          className="h-auto min-h-16 shrink-0 flex-col gap-1 border-dashed px-4"
+          className="h-auto shrink-0 border-dashed px-2"
         >
-          <Plus aria-hidden="true" className="h-4 w-4" />
-          <span className="text-[11px]">New scene</span>
+          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+          <span className="text-[11px]">New</span>
         </Button>
       </div>
 
-      {/* Transition settings for the active scene — these are what plays when
-          switching *to* this scene. */}
+      {/*
+        Transition settings for the active scene — what plays when switching
+        *to* it. Collapsed by default: these are set once per scene, while the
+        vertical space they occupy is taken from the program canvas, which the
+        operator looks at constantly.
+      */}
       {activeScene ? (
-        <div className="flex flex-wrap items-end gap-2 border-t border-deck-700 pt-2">
+        <div className="border-t border-deck-700 pt-1.5">
+          <button
+            type="button"
+            onClick={() => setShowTransition((value) => !value)}
+            aria-expanded={showTransition}
+            className="flex w-full items-center gap-2 text-left text-[11px] text-ink-400 hover:text-ink-200"
+          >
+            <ChevronRight
+              aria-hidden="true"
+              className={cn('h-3 w-3 transition-transform', showTransition && 'rotate-90')}
+            />
+            Transition into this scene
+            <span className="font-mono text-[10px] text-ink-500">
+              {activeScene.transition.type}
+              {activeScene.transition.type !== 'cut'
+                ? ` · ${activeScene.transition.durationMs}ms`
+                : ''}
+            </span>
+          </button>
+        </div>
+      ) : null}
+
+      {activeScene && showTransition ? (
+        <div className="flex flex-wrap items-end gap-2 border-t border-deck-800 pt-2">
           <SelectField
             label="Transition into this scene"
             value={activeScene.transition.type}
@@ -152,7 +194,7 @@ function SceneCard({
 
   if (editing) {
     return (
-      <div className="flex w-44 shrink-0 flex-col gap-1 rounded-md border border-accent-500 bg-deck-800 p-2">
+      <div className="flex w-44 shrink-0 flex-col gap-1 border border-accent-500 bg-deck-800 p-2">
         <TextField
           label="Scene name"
           srOnlyLabel
@@ -174,7 +216,7 @@ function SceneCard({
   return (
     <div
       className={cn(
-        'group relative flex w-40 shrink-0 flex-col justify-between rounded-md border p-2 text-left transition-colors',
+        'group relative flex w-32 shrink-0 flex-col justify-between gap-0.5 border px-1.5 py-1 text-left transition-colors',
         active
           ? 'border-accent-400 bg-accent-500/10 ring-1 ring-accent-400'
           : 'border-deck-600 bg-deck-800 hover:border-deck-500',
@@ -188,24 +230,27 @@ function SceneCard({
         // them, which is the expected tablist behaviour.
         tabIndex={active ? 0 : -1}
         onClick={onActivate}
-        className="flex flex-col items-start gap-1 text-left focus-visible:outline-none"
+        className="flex min-w-0 flex-col items-start text-left focus-visible:outline-none"
       >
-        <span className="truncate text-xs font-semibold text-ink-100">{scene.name}</span>
+        <span className="w-full truncate text-xs font-semibold text-ink-100">{scene.name}</span>
         <span className="text-[10px] text-ink-500">
+          {active ? 'On air · ' : ''}
           {scene.items.length === 0
             ? 'Empty'
-            : `${visibleCount} of ${scene.items.length} visible`}
+            : `${visibleCount}/${scene.items.length} visible`}
         </span>
-        {active ? <Badge tone="live">On air</Badge> : null}
       </button>
 
-      <div className="mt-2 flex items-center gap-0.5">
+      {/* Actions sit on one compact row — always in the DOM, never
+          hover-only, so keyboard and touch can reach them. */}
+      <div className="flex items-center gap-0.5">
         <Button
           variant="ghost"
           size="icon-sm"
           onClick={onStartRename}
           aria-label={`Rename ${scene.name}`}
           title="Rename"
+          className="h-6 w-6"
         >
           <Pencil aria-hidden="true" className="h-3 w-3" />
         </Button>
@@ -215,6 +260,7 @@ function SceneCard({
           onClick={onDuplicate}
           aria-label={`Duplicate ${scene.name}`}
           title="Duplicate"
+          className="h-6 w-6"
         >
           <Copy aria-hidden="true" className="h-3 w-3" />
         </Button>
@@ -224,7 +270,7 @@ function SceneCard({
           onClick={onDelete}
           aria-label={`Delete ${scene.name}`}
           title="Delete"
-          className="ml-auto hover:text-live-400"
+          className="ml-auto h-6 w-6 hover:text-live-400"
         >
           <Trash2 aria-hidden="true" className="h-3 w-3" />
         </Button>

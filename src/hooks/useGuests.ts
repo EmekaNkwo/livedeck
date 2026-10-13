@@ -1,30 +1,25 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useMemo } from 'react'
 import type { Guest, PeerState, PeerStats } from '@/types/peer'
 import { streamRegistry } from '@/services/media/stream-registry'
 import { peerManager } from '@/services/webrtc/peer-manager'
-import { audioMixer } from '@/services/audio/audio-mixer'
-import { createSyntheticGuestStream } from '@/services/simulation/synthetic-media'
-import type { SyntheticStream } from '@/services/simulation/synthetic-media'
 import { streamKeys } from '@/services/sources/source-factory'
 import { useGuestStore } from '@/stores/guestStore'
 import { useSceneStore } from '@/stores/sceneStore'
 import { useSourceStore } from '@/stores/sourceStore'
 import { useAudioStore } from '@/stores/audioStore'
 import { useStudioStore } from '@/stores/studioStore'
-import { useSimulationStore } from '@/stores/simulationStore'
 import { useMediaSources } from './useMediaSources'
 
 /**
- * Guest management for both operation modes.
+ * Guest management.
  *
- * Local Studio Mode guests are backed by *real* synthetic MediaStreams — an
- * animated canvas plus a tone — so they travel the same path as a remote peer:
- * stream registry, compositor, mixer, recorder. They are labelled "simulated"
- * everywhere, including a watermark burned into their video, so a reviewer can
- * never mistake one for a connected participant.
+ * A guest row is identity and layout only; it holds no live objects. Media
+ * arrives from `useWebRTC`, which binds an incoming remote stream to the
+ * guest's video and audio sources.
  *
- * Peer-mode guests get their media from `useWebRTC`, which binds an incoming
- * remote stream to the guest's sources.
+ * A guest existing here says nothing about whether its connection succeeded —
+ * `connected` is derived solely from the real peer state, so the UI can never
+ * imply a connection that does not exist.
  */
 
 export type GuestView = {
@@ -42,14 +37,13 @@ export type GuestView = {
 
 export type UseGuests = {
   guests: GuestView[]
-  addSimulatedGuest: (name?: string) => Guest | null
   addPeerGuest: (name?: string) => Guest
   requestRemoveGuest: (guestId: string) => void
   removeGuest: (guestId: string) => void
   renameGuest: (guestId: string, name: string) => void
   setMutedInMix: (guestId: string, muted: boolean) => void
   setVideoHidden: (guestId: string, hidden: boolean) => void
-  /** Attach a live stream (remote or synthetic) to a guest's sources. */
+  /** Attach an incoming remote stream to a guest's sources. */
   attachStream: (guestId: string, stream: MediaStream) => void
   detachStream: (guestId: string) => void
 }
@@ -69,26 +63,26 @@ export function useGuests(): UseGuests {
 
   const sources = useSourceStore((state) => state.sources)
   const setMixMuted = useAudioStore((state) => state.setMutedInMix)
-  const showToast = useStudioStore((state) => state.showToast)
   const requestConfirm = useStudioStore((state) => state.requestConfirm)
-  const logSimulation = useSimulationStore((state) => state.logEvent)
 
   const { addSource, removeSource, replaceStream } = useMediaSources()
 
   /**
-   * Synthetic generators, keyed by guest id.
+   * Find a guest's video/audio source ids.
    *
-   * Held in a ref rather than in a store because they are live objects with
-   * `stop()` side effects. They are torn down on guest removal and on unmount.
+   * Reads the store directly rather than the `sources` snapshot this hook
+   * rendered with. That is load-bearing, not tidiness: `ontrack` fires **once
+   * per track**, so a guest sending camera and microphone calls
+   * {@link attachStream} twice in immediate succession — before React has
+   * re-rendered. Against a stale snapshot the second call could not see the
+   * source the first had just created, so it created another one, and the
+   * guest appeared twice in the scene.
    */
-  const syntheticRef = useRef(new Map<string, SyntheticStream>())
-
-  /** Find a guest's video/audio source ids. */
   const findGuestSources = useCallback(
     (guestId: string) => {
       let videoSourceId: string | null = null
       let audioSourceId: string | null = null
-      for (const source of Object.values(sources)) {
+      for (const source of Object.values(useSourceStore.getState().sources)) {
         if (source.settings.kind === 'remote-video' && source.settings.guestId === guestId) {
           videoSourceId = source.id
         }
@@ -98,7 +92,10 @@ export function useGuests(): UseGuests {
       }
       return { videoSourceId, audioSourceId }
     },
-    [sources],
+    // No dependency on the rendered `sources` snapshot — reading the store
+    // keeps this callback stable, which also stops `attachStream` from being
+    // rebuilt (and the peer manager reconfigured) on every source change.
+    [],
   )
 
   /**
@@ -127,7 +124,6 @@ export function useGuests(): UseGuests {
             type: 'remote-video',
             streamKey: key,
             settings: { kind: 'remote-video', guestId },
-            simulated: guest.simulated,
             addToMixer: false,
           })
           // The video source registered the key; the audio source below takes
@@ -145,7 +141,6 @@ export function useGuests(): UseGuests {
             type: 'remote-audio',
             streamKey: key,
             settings: { kind: 'remote-audio', guestId },
-            simulated: guest.simulated,
             mixerKind: 'guest',
             addToScene: false,
           })
@@ -160,57 +155,12 @@ export function useGuests(): UseGuests {
       const { videoSourceId, audioSourceId } = findGuestSources(guestId)
       if (videoSourceId) removeSource(videoSourceId)
       if (audioSourceId) removeSource(audioSourceId)
-      const synthetic = syntheticRef.current.get(guestId)
-      if (synthetic) {
-        synthetic.stop()
-        syntheticRef.current.delete(guestId)
-      }
     },
     [findGuestSources, removeSource],
   )
 
-  /**
-   * Add a demo guest with generated media.
-   *
-   * Requires a running AudioContext for the tone; without one the guest still
-   * gets video, and the UI explains that audio needs the mixer enabled.
-   */
-  const addSimulatedGuest = useCallback(
-    (name?: string): Guest | null => {
-      const guest = addGuestToStore({ name, simulated: true })
-      const index = Object.values(useGuestStore.getState().guests).filter((g) => g.simulated).length - 1
-
-      try {
-        const synthetic = createSyntheticGuestStream({
-          label: guest.name,
-          index: Math.max(0, index),
-          width: 640,
-          height: 360,
-          frameRate: 30,
-          audioContext: audioMixer.getContext(),
-        })
-        syntheticRef.current.set(guest.id, synthetic)
-        attachStream(guest.id, synthetic.stream)
-
-        if (!audioMixer.getContext()) {
-          showToast(
-            'Demo guest added with video only — enable the audio mixer to generate its tone.',
-            'info',
-          )
-        }
-        logSimulation(`Demo guest “${guest.name}” added with generated media`)
-        return guest
-      } catch {
-        removeGuestFromStore(guest.id)
-        showToast('Simulated guest media could not be generated in this browser.', 'error')
-        return null
-      }
-    },
-    [addGuestToStore, attachStream, logSimulation, removeGuestFromStore, showToast],
-  )
-
   const addPeerGuest = useCallback(
-    (name?: string) => addGuestToStore({ name, simulated: false }),
+    (name?: string) => addGuestToStore({ name }),
     [addGuestToStore],
   )
 
@@ -242,9 +192,8 @@ export function useGuests(): UseGuests {
       if (!guest) return
       requestConfirm({
         title: `Remove ${guest.name}?`,
-        message: guest.simulated
-          ? 'The simulated feed will stop and its sources will be removed from every scene.'
-          : 'The peer connection will be closed and this guest’s sources removed from every scene.',
+        message:
+          'The peer connection will be closed and this guest’s sources removed from every scene.',
         confirmLabel: 'Remove guest',
         destructive: true,
         onConfirm: () => removeGuest(guestId),
@@ -285,16 +234,6 @@ export function useGuests(): UseGuests {
     [findGuestSources, setHiddenInStore],
   )
 
-  // Stop every generator when the studio unmounts, so no rAF loop or
-  // oscillator outlives the session.
-  useEffect(
-    () => () => {
-      for (const synthetic of syntheticRef.current.values()) synthetic.stop()
-      syntheticRef.current.clear()
-    },
-    [],
-  )
-
   const guests = useMemo<GuestView[]>(() => {
     return order
       .map((id) => guestsRecord[id])
@@ -323,7 +262,7 @@ export function useGuests(): UseGuests {
           stream,
           videoSourceId,
           audioSourceId,
-          statusLabel: describeGuestStatus(guest, peer, stream),
+          statusLabel: describeGuestStatus(peer),
           // Only a real peer in the connected state counts as connected.
           connected: peer?.status === 'connected',
         }
@@ -332,7 +271,6 @@ export function useGuests(): UseGuests {
 
   return {
     guests,
-    addSimulatedGuest,
     addPeerGuest,
     requestRemoveGuest,
     removeGuest,
@@ -347,17 +285,11 @@ export function useGuests(): UseGuests {
 /**
  * Honest status text.
  *
- * A simulated guest never claims to be "connected" — it reports that it is a
- * local generated feed. A peer guest reports its real transport state.
+ * Reports the guest's real transport state and nothing more; a row with no
+ * peer says so rather than implying it is waiting on something that is
+ * already underway.
  */
-function describeGuestStatus(
-  guest: Guest,
-  peer: PeerState | null,
-  stream: MediaStream | null,
-): string {
-  if (guest.simulated) {
-    return stream ? 'Simulated feed — generated locally' : 'Simulated feed — not started'
-  }
+function describeGuestStatus(peer: PeerState | null): string {
   if (!peer) return 'No connection — awaiting signaling'
   switch (peer.status) {
     case 'connected':

@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { RELAY_PORT } from './e2e/fixtures'
 
 /**
  * Browser-level tests for the production workflow.
@@ -61,12 +62,35 @@ export default defineConfig({
     },
   ],
 
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5173',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: 'ignore',
-    stderr: 'pipe',
-  },
+  /*
+   * Two processes: the studio, and the signaling relay.
+   *
+   * The relay is only needed by `room.spec.ts`, but room-based signaling is the
+   * default transport — so starting it here is what makes the default path
+   * testable at all. `peer.spec.ts` seeds the manual transport explicitly and
+   * is unaffected by whether this is up.
+   */
+  webServer: [
+    {
+      command: 'npm run dev',
+      url: 'http://localhost:5173',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'ignore',
+      stderr: 'pipe',
+    },
+    {
+      command: 'npm --prefix server run dev',
+      // `/healthz` is the relay's own endpoint, registered ahead of Next. Using
+      // it rather than `/` means a *different* process holding this port fails
+      // this check instead of being mistaken for the relay — which otherwise
+      // surfaces as a WebSocket that connects and then never upgrades.
+      url: `http://localhost:${RELAY_PORT}/healthz`,
+      env: { PORT: RELAY_PORT },
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'ignore',
+      stderr: 'pipe',
+    },
+  ],
 })

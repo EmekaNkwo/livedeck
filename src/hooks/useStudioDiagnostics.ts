@@ -16,19 +16,15 @@ import { useSceneStore } from '@/stores/sceneStore'
 import { useGuestStore } from '@/stores/guestStore'
 import { useAudioStore } from '@/stores/audioStore'
 import { useRecordingStore } from '@/stores/recordingStore'
-import { useSimulationStore } from '@/stores/simulationStore'
 
 /**
  * Technical inspection.
  *
- * TWO RULES THIS HOOK FOLLOWS
- * ---------------------------
- * 1. Every metric is either a real reading or an explicit "unavailable". No
- *    value is estimated, interpolated or invented. `PeerStats` fields are
- *    nullable precisely so the UI can render a dash.
- * 2. Simulated state is labelled. A demo guest has no transport, so it is
- *    reported as "simulated — no peer connection" instead of being given
- *    plausible-looking RTT and bitrate numbers.
+ * THE RULE THIS HOOK FOLLOWS
+ * --------------------------
+ * Every metric is either a real reading or an explicit "unavailable". No value
+ * is estimated, interpolated or invented. `PeerStats` fields are nullable
+ * precisely so the UI can render a dash instead of a plausible-looking number.
  *
  * Polled on a timer rather than subscribed per-frame: diagnostics are for
  * reading, and a 1Hz refresh costs nothing.
@@ -39,8 +35,6 @@ export type PeerDiagnostic = {
   guestName: string
   state: PeerState
   stats: PeerStats | null
-  /** True when the demo panel's poor-connection flag is on. */
-  simulatedDegradation: boolean
 }
 
 export type StudioDiagnostics = {
@@ -77,7 +71,6 @@ export type StudioDiagnostics = {
   supportedFormats: RecordingFormat[]
 
   peers: PeerDiagnostic[]
-  simulationsActive: string[]
   objectUrlCount: number
 }
 
@@ -101,7 +94,6 @@ export function useStudioDiagnostics(): StudioDiagnostics {
   const audioContextStatus = useAudioStore((state) => state.contextStatus)
   const recordingStatus = useRecordingStore((state) => state.status)
   const recordingFormat = useRecordingStore((state) => state.format)
-  const simulationFlags = useSimulationStore((state) => state.flags)
 
   /** Live readings that are not in any store, sampled on a timer. */
   const [live, setLive] = useState(() => sampleLive())
@@ -122,13 +114,8 @@ export function useStudioDiagnostics(): StudioDiagnostics {
       state,
       // Stats only exist once a connection is up; before that, null is honest.
       stats: peerStats[state.peerId] ?? null,
-      simulatedDegradation: simulationFlags.poorConnection,
     }
   })
-
-  const simulationsActive = Object.entries(simulationFlags)
-    .filter(([, enabled]) => enabled)
-    .map(([flag]) => SIMULATION_LABEL[flag] ?? flag)
 
   return {
     capabilityGaps: findCapabilityGaps(),
@@ -162,7 +149,6 @@ export function useStudioDiagnostics(): StudioDiagnostics {
     supportedFormats: live.supportedFormats,
 
     peers,
-    simulationsActive,
     objectUrlCount: live.objectUrlCount,
   }
 }
@@ -186,10 +172,3 @@ function sampleLive() {
   }
 }
 
-const SIMULATION_LABEL: Record<string, string> = {
-  cameraInterruption: 'Camera interruption',
-  guestDisconnect: 'Guest disconnect',
-  poorConnection: 'Poor connection',
-  recordingFailure: 'Recording failure',
-  sourceUnavailable: 'Source unavailable',
-}

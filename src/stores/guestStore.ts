@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Guest, PeerState, PeerStats } from '@/types/peer'
+import type { ControlChannelState } from '@/types/room'
 import { createGuestId, uniqueName } from '@/utils/id'
 
 /**
@@ -14,8 +15,6 @@ import { createGuestId, uniqueName } from '@/utils/id'
  * succeeded. The UI reads `peerStates` for that, so it can never imply a
  * connection that does not exist.
  *
- * Simulated guests never get a `peerStates` entry, and the diagnostics panel
- * shows "simulated — no transport" for them rather than inventing metrics.
  */
 
 type GuestState = {
@@ -23,8 +22,16 @@ type GuestState = {
   order: string[]
   peerStates: Record<string, PeerState>
   peerStats: Record<string, PeerStats>
+  /**
+   * Director ↔ guest command channel state, keyed by peer id.
+   *
+   * Separate from `peerStates` because a media connection can be up while the
+   * control path is not, and the UI must not offer remote controls it cannot
+   * actually deliver.
+   */
+  controlStates: Record<string, ControlChannelState>
 
-  addGuest: (options: { name?: string; simulated: boolean; peerId?: string | null }) => Guest
+  addGuest: (options: { name?: string; peerId?: string | null }) => Guest
   removeGuest: (guestId: string) => void
   renameGuest: (guestId: string, name: string) => void
   setMutedInMix: (guestId: string, muted: boolean) => void
@@ -33,6 +40,7 @@ type GuestState = {
 
   setPeerState: (state: PeerState) => void
   setPeerStats: (peerId: string, stats: PeerStats) => void
+  setControlState: (state: ControlChannelState) => void
   removePeer: (peerId: string) => void
 
   hydrate: (guests: Guest[], order: string[]) => void
@@ -45,17 +53,15 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
   order: [],
   peerStates: {},
   peerStats: {},
+  controlStates: {},
 
-  addGuest: ({ name, simulated, peerId }) => {
+  addGuest: ({ name, peerId }) => {
     const id = createGuestId()
     const existingNames = Object.values(get().guests).map((guest) => guest.name)
-    const defaultName = simulated
-      ? `Demo Guest ${Object.values(get().guests).filter((g) => g.simulated).length + 1}`
-      : `Guest ${Object.values(get().guests).filter((g) => !g.simulated).length + 1}`
+    const defaultName = `Guest ${Object.keys(get().guests).length + 1}`
     const guest: Guest = {
       id,
       name: uniqueName(name?.trim() || defaultName, existingNames),
-      simulated,
       videoHidden: false,
       mutedInMix: false,
       peerId: peerId ?? null,
@@ -77,15 +83,18 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
 
       const peerStates = { ...state.peerStates }
       const peerStats = { ...state.peerStats }
+      const controlStates = { ...state.controlStates }
       if (guest.peerId) {
         delete peerStates[guest.peerId]
         delete peerStats[guest.peerId]
+        delete controlStates[guest.peerId]
       }
       return {
         guests,
         order: state.order.filter((id) => id !== guestId),
         peerStates,
         peerStats,
+        controlStates,
       }
     }),
 
@@ -128,13 +137,20 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
   setPeerStats: (peerId, stats) =>
     set((state) => ({ peerStats: { ...state.peerStats, [peerId]: stats } })),
 
+  setControlState: (controlState) =>
+    set((state) => ({
+      controlStates: { ...state.controlStates, [controlState.peerId]: controlState },
+    })),
+
   removePeer: (peerId) =>
     set((state) => {
       const peerStates = { ...state.peerStates }
       const peerStats = { ...state.peerStats }
+      const controlStates = { ...state.controlStates }
       delete peerStates[peerId]
       delete peerStats[peerId]
-      return { peerStates, peerStats }
+      delete controlStates[peerId]
+      return { peerStates, peerStats, controlStates }
     }),
 
   hydrate: (guests, order) =>
@@ -147,12 +163,19 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
       }
       const known = order.filter((id) => map[id])
       const missing = guests.map((guest) => guest.id).filter((id) => !known.includes(id))
-      return { guests: map, order: [...known, ...missing], peerStates: {}, peerStats: {} }
+      return {
+        guests: map,
+        order: [...known, ...missing],
+        peerStates: {},
+        peerStats: {},
+        controlStates: {},
+      }
     }),
 
-  clear: () => set({ guests: {}, order: [], peerStates: {}, peerStats: {} }),
+  clear: () =>
+    set({ guests: {}, order: [], peerStates: {}, peerStats: {}, controlStates: {} }),
 
-  clearLive: () => set({ peerStates: {}, peerStats: {} }),
+  clearLive: () => set({ peerStates: {}, peerStats: {}, controlStates: {} }),
 }))
 
 /* ---------------------------------------------------------------- selectors */

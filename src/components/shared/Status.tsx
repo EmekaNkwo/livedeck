@@ -73,27 +73,13 @@ export function Badge({ children, tone = 'neutral', className }: BadgeProps) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase',
+        'inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase',
         BADGE_TONE[tone],
         className,
       )}
     >
       {children}
     </span>
-  )
-}
-
-/**
- * Explicit "simulated" marker.
- *
- * Used everywhere a demo-mode feed appears, so a reviewer can never mistake a
- * generated feed for a connected remote participant.
- */
-export function SimulatedBadge({ className }: { className?: string }) {
-  return (
-    <Badge tone="warn" className={className}>
-      Simulated
-    </Badge>
   )
 }
 
@@ -127,18 +113,11 @@ export type MetricProps = {
   label: string
   /** Pre-formatted value. Pass "—" for genuinely unavailable metrics. */
   value: React.ReactNode
-  /** Marks a value that comes from the simulation layer, not from the browser. */
-  simulated?: boolean
   mono?: boolean
 }
 
-/**
- * One diagnostics reading.
- *
- * A `simulated` metric is labelled inline, so injected demo values are never
- * confused with real `getStats()` output.
- */
-export function Metric({ label, value, simulated, mono = true }: MetricProps) {
+/** One diagnostics reading. */
+export function Metric({ label, value, mono = true }: MetricProps) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-0.5">
       <dt className="shrink-0 text-[11px] text-ink-500">{label}</dt>
@@ -149,11 +128,6 @@ export function Metric({ label, value, simulated, mono = true }: MetricProps) {
         )}
       >
         {value}
-        {simulated ? (
-          <span className="ml-1.5 font-sans text-[9px] font-semibold tracking-wide text-warn-400 uppercase">
-            sim
-          </span>
-        ) : null}
       </dd>
     </div>
   )
@@ -187,7 +161,7 @@ export function Notice({
     <div
       role={tone === 'error' ? 'alert' : 'note'}
       className={cn(
-        'flex gap-2 rounded-md border px-2.5 py-2 text-[11px] leading-relaxed',
+        'flex gap-2 border px-2.5 py-2 text-[11px] leading-relaxed',
         styles,
         className,
       )}

@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Browser-based video broadcasting and live production studio. No backend required.",
+  "description": "Browser-based video broadcasting and live production studio. Guests join by room link; only signaling needs a server.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

@@ -18,9 +18,17 @@ export class ManualSignalingAdapter implements SignalingAdapter {
     label: 'Manual exchange (copy & paste)',
     crossDevice: true,
     requiresManualExchange: true,
+    supportsRooms: false,
+    /*
+     * No trickle ICE: a copied link or code has nowhere to deliver a candidate
+     * that turns up a second after it was sent. That is why the manual path
+     * waits for gathering to complete and ships one SDP with everything in it.
+     */
+    supportsTrickleIce: false,
     description:
-      'Session descriptions are exchanged by hand. Works between any two browsers with no server, ' +
-      'but both sides must be able to reach each other over the network.',
+      'Session descriptions are exchanged by hand, in a link or a code. Works between any two ' +
+      'browsers with no server at all, but both sides must be able to reach each other over the ' +
+      'network, and the guest’s answer has to travel back manually.',
   }
 
   private events: Partial<SignalingEvents> = {}

@@ -11,7 +11,6 @@ import { formatTimestamp } from '@/utils/format'
 import { useRecordingStore } from '@/stores/recordingStore'
 import { useStudioStore } from '@/stores/studioStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { useSimulationStore } from '@/stores/simulationStore'
 
 /**
  * Recording controls over the composed program output.
@@ -61,8 +60,6 @@ export function useRecording(): UseRecording {
   const requestConfirm = useStudioStore((state) => state.requestConfirm)
 
   const frameRate = useSettingsStore((state) => state.settings.output.frameRate)
-  const simulateFailure = useSimulationStore((state) => state.flags.recordingFailure)
-  const logSimulation = useSimulationStore((state) => state.logEvent)
 
   const supportedFormats = useMemo(() => listSupportedFormats(), [])
   const canRecord = supportedFormats.length > 0
@@ -181,20 +178,17 @@ export function useRecording(): UseRecording {
       showToast('Recording video only — the audio mixer is not available.', 'info')
     }
 
-    if (simulateFailure) logSimulation('Recording failure injected')
-
     const started = await recordingEngine.start({
       canvas,
       audioStream,
       frameRate,
-      simulateFailure,
     })
 
     if (started) {
       setElapsed(0)
       setFormat(recordingEngine.getFormat())
     }
-  }, [frameRate, logSimulation, setElapsed, setError, setFormat, showToast, simulateFailure])
+  }, [frameRate, setElapsed, setError, setFormat, showToast])
 
   const stop = useCallback(() => recordingEngine.stop(), [])
   const pause = useCallback(() => recordingEngine.pause(), [])

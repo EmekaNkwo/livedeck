@@ -3,42 +3,45 @@
 /*
  * LiveDeck Studio design tokens.
  *
- * A dark broadcast-desk palette: near-black panels, a single amber accent for
- * "on air", and a cyan accent for selection and focus. Status is never
- * communicated by colour alone — every state also carries an icon or a text
- * label, so the interface stays readable for colour-blind operators and in
- * high-contrast modes.
+ * The visual language follows VDO.Ninja rather than OBS: flat, utilitarian,
+ * near-black with a bright blue accent. It reads as a *tool* — bordered boxes,
+ * dense rows, monospace for anything copyable — not as a skinned broadcast
+ * desk. There are no gradients, no heavy panel chrome and almost no radius.
+ *
+ * Status is never communicated by colour alone: every state also carries an
+ * icon shape and a text label, so the interface stays readable for colour-blind
+ * operators and on washed-out projectors.
  */
 @theme {
-  /* Surfaces, darkest to lightest. */
-  --color-deck-950: #06070a;
-  --color-deck-900: #0a0c11;
-  --color-deck-850: #0e1117;
-  --color-deck-800: #13171f;
-  --color-deck-750: #181d27;
-  --color-deck-700: #1e242f;
-  --color-deck-600: #2a313e;
-  --color-deck-500: #3a424f;
+  /* Surfaces, darkest to lightest. Near-black with a faint blue cast. */
+  --color-deck-950: #0a0c10;
+  --color-deck-900: #0f1117;
+  --color-deck-850: #14171f;
+  --color-deck-800: #191d26;
+  --color-deck-750: #1f242f;
+  --color-deck-700: #262c38;
+  --color-deck-600: #333a48;
+  --color-deck-500: #46506180;
 
   /* Text. */
-  --color-ink-100: #f3f5f8;
-  --color-ink-200: #dde2ea;
-  --color-ink-300: #b9c1ce;
-  --color-ink-400: #8d97a7;
-  --color-ink-500: #6b7484;
+  --color-ink-100: #f5f7fa;
+  --color-ink-200: #dfe4ec;
+  --color-ink-300: #b4bccb;
+  --color-ink-400: #8a94a6;
+  --color-ink-500: #67707f;
 
-  /* Accents. */
-  --color-accent-400: #35d3e0;
-  --color-accent-500: #1cb8c6;
-  --color-accent-600: #148f9b;
+  /* Primary accent — VDO.Ninja's blue. */
+  --color-accent-400: #5aa9ff;
+  --color-accent-500: #2b8cf0;
+  --color-accent-600: #1a6fd0;
 
-  /* On-air / recording. */
-  --color-live-400: #ff7a59;
-  --color-live-500: #f4542c;
-  --color-live-600: #cf3f1d;
+  /* On-air / recording / destructive. */
+  --color-live-400: #ff6b6b;
+  --color-live-500: #e8373d;
+  --color-live-600: #c22a30;
 
-  --color-warn-400: #f5c451;
-  --color-warn-500: #e0a92f;
+  --color-warn-400: #ffcc55;
+  --color-warn-500: #e6a92b;
 
   --color-ok-400: #4ade80;
   --color-ok-500: #22c55e;
@@ -47,7 +50,8 @@
     ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
 
-  --radius-panel: 0.625rem;
+  /* Deliberately small: VDO.Ninja's boxes are square-ish, not pill-shaped. */
+  --radius-panel: 0.25rem;
 }
 
 @layer base {
@@ -100,15 +104,14 @@
     height: 10px;
   }
   ::-webkit-scrollbar-track {
-    background: var(--color-deck-900);
+    background: var(--color-deck-950);
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-deck-600);
-    border-radius: 5px;
-    border: 2px solid var(--color-deck-900);
+    background: var(--color-deck-700);
+    border: 2px solid var(--color-deck-950);
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--color-deck-500);
+    background: var(--color-deck-600);
   }
 
   /* Range inputs are used for every fader and numeric slider, so they get a
@@ -120,31 +123,28 @@
     cursor: pointer;
   }
   input[type='range']::-webkit-slider-runnable-track {
-    height: 4px;
-    border-radius: 2px;
+    height: 3px;
     background: var(--color-deck-600);
   }
   input[type='range']::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    margin-top: -6px;
-    height: 16px;
-    width: 16px;
-    border-radius: 50%;
-    background: var(--color-ink-100);
-    border: 2px solid var(--color-deck-850);
+    margin-top: -5px;
+    height: 13px;
+    width: 13px;
+    background: var(--color-accent-400);
+    border: 1px solid var(--color-deck-950);
   }
   input[type='range']::-moz-range-track {
-    height: 4px;
-    border-radius: 2px;
+    height: 3px;
     background: var(--color-deck-600);
   }
   input[type='range']::-moz-range-thumb {
-    height: 14px;
-    width: 14px;
-    border: 2px solid var(--color-deck-850);
-    border-radius: 50%;
-    background: var(--color-ink-100);
+    height: 11px;
+    width: 11px;
+    border: 1px solid var(--color-deck-950);
+    border-radius: 0;
+    background: var(--color-accent-400);
   }
 }
 
@@ -181,6 +181,20 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border-width: 0;
+  }
+
+  /*
+   * A copyable URL. VDO.Ninja puts links everywhere, so they get a single
+   * consistent treatment: monospace, selectable, wrapping on any character so
+   * a long hash-fragment invite never blows out its container.
+   */
+  .url-box {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+    user-select: all;
   }
 }
 

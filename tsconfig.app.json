@@ -30,8 +30,9 @@
 
     /* Paths — resolved relative to this file (no baseUrl; removed in TS 7). */
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["./shared/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "shared"]
 }

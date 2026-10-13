@@ -4,10 +4,13 @@ import {
   addSourceDialog,
   canvasHasContent,
   canvasSize,
-  createSession,
   onAirTally,
   openDiagnostics,
+  openDirector,
+  openProperties,
+  openSources,
   propertyField,
+  recordingPanel,
   shareScreen,
   sourceRows,
   startCamera,
@@ -22,7 +25,7 @@ import {
 
 test.describe('Scenario B: source composition', () => {
   test('composes a camera over a screen share', async ({ page }) => {
-    await createSession(page, 'Composition')
+    await openDirector(page)
     await shareScreen(page)
     await startCamera(page)
 
@@ -33,10 +36,11 @@ test.describe('Scenario B: source composition', () => {
   })
 
   test('resizes and repositions sources through numeric controls', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
     await startCamera(page)
 
     await sourceRows(page).filter({ hasText: 'Camera' }).first().click()
+    await openProperties(page)
 
     // Place the camera as a picture-in-picture in the lower right.
     await propertyField(page, 'Width').fill('320')
@@ -56,7 +60,7 @@ test.describe('Scenario B: source composition', () => {
   })
 
   test('changes layer ordering', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
 
     // Two backgrounds, so ordering is unambiguous.
     await addBackground(page, '#202020')
@@ -77,7 +81,7 @@ test.describe('Scenario B: source composition', () => {
   })
 
   test('hiding a source removes it from the output but keeps it in the scene', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
     await addBackground(page, '#f5f5f5')
 
     await expect.poll(() => canvasHasContent(page), { timeout: 15_000 }).toBe(true)
@@ -96,10 +100,12 @@ test.describe('Scenario B: source composition', () => {
   })
 
   test('locking a source prevents geometry edits', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
+    await openSources(page)
     await page.getByRole('button', { name: 'Add a source' }).click()
     await addSourceDialog(page).getByRole('button', { name: /Add background/i }).click()
 
+    await openProperties(page)
     const properties = page.getByRole('region', { name: 'Properties' })
     await properties.getByLabel(/Lock position and size/i).check()
 
@@ -112,7 +118,7 @@ test.describe('Scenario B: source composition', () => {
   })
 
   test('changing the output aspect ratio resizes the program canvas', async ({ page }) => {
-    await createSession(page)
+    await openDirector(page)
     expect(await canvasSize(page)).toEqual({ width: 1280, height: 720 })
 
     await page.getByRole('button', { name: 'Studio settings' }).click()
@@ -126,14 +132,14 @@ test.describe('Scenario B: source composition', () => {
   })
 
   test('records a multi-source composition', async ({ page }) => {
-    await createSession(page, 'Composition recording')
+    await openDirector(page)
     await startCamera(page)
 
     await addBackground(page, '#1a2b3c')
 
     await expect.poll(() => canvasHasContent(page), { timeout: 20_000 }).toBe(true)
 
-    const recording = page.getByRole('region', { name: 'Recording' })
+    const recording = await recordingPanel(page)
     await recording.getByRole('button', { name: /Start recording/i }).click()
     await expect(onAirTally(page)).toBeVisible()
 

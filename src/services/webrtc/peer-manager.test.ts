@@ -18,7 +18,45 @@ const SDP_OFFER = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96', 'a=candidate:1 1 udp
   '\r\n',
 )
 
+/**
+ * A data channel stub.
+ *
+ * The manager creates a control channel inside `createOffer`, so one has to
+ * exist for the offer path to run at all. It opens on the next tick, which is
+ * close enough to the real asynchronous open for these state-machine tests.
+ */
+class FakeDataChannel {
+  readyState: RTCDataChannelState = 'connecting'
+  binaryType = 'blob'
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onmessage: ((event: MessageEvent) => void) | null = null
+  readonly sent: string[] = []
+
+  readonly label: string
+
+  constructor(label: string) {
+    this.label = label
+    queueMicrotask(() => {
+      this.readyState = 'open'
+      this.onopen?.()
+    })
+  }
+
+  send(data: string): void {
+    if (this.readyState !== 'open') throw new Error('channel not open')
+    this.sent.push(data)
+  }
+
+  close(): void {
+    this.readyState = 'closed'
+    this.onclose?.()
+  }
+}
+
 type FakePeer = {
+  appliedCandidates: RTCIceCandidateInit[]
   connectionState: RTCPeerConnectionState
   iceConnectionState: RTCIceConnectionState
   iceGatheringState: RTCIceGatheringState
@@ -35,11 +73,17 @@ let peers: FakePeer[] = []
 let offerRejects = false
 /** Set by a test to make setRemoteDescription reject. */
 let remoteDescriptionRejects = false
+/**
+ * Set by a test to have the connection reach `connected` *during*
+ * `setRemoteDescription`, which is what a fast trickle-ICE link really does.
+ */
+let connectDuringRemoteDescription = false
 
 function installPeerConnection() {
   peers = []
   offerRejects = false
   remoteDescriptionRejects = false
+  connectDuringRemoteDescription = false
 
   class FakeRTCPeerConnection extends EventTarget {
     connectionState: RTCPeerConnectionState = 'new'
@@ -53,7 +97,9 @@ function installPeerConnection() {
     onicegatheringstatechange: (() => void) | null = null
     onsignalingstatechange: (() => void) | null = null
     onicecandidate: (() => void) | null = null
+    ondatachannel: ((event: RTCDataChannelEvent) => void) | null = null
     ontrack: ((event: RTCTrackEvent) => void) | null = null
+    channels: FakeDataChannel[] = []
 
     private senders: RTCRtpSender[] = []
     private transceivers: RTCRtpTransceiver[] = []
@@ -79,7 +125,24 @@ function installPeerConnection() {
       if (remoteDescriptionRejects) throw new Error('invalid SDP')
       this.signalingState = description.type === 'offer' ? 'have-remote-offer' : 'stable'
       this.onsignalingstatechange?.()
+      if (connectDuringRemoteDescription) {
+        // The candidates were already in flight, so ICE completes before the
+        // caller resumes after this await.
+        this.transition('connected')
+      }
     }
+    /** Test helper: candidates this connection was actually given. */
+    readonly appliedCandidates: RTCIceCandidateInit[] = []
+    async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+      this.appliedCandidates.push(candidate)
+    }
+
+    createDataChannel(label: string): RTCDataChannel {
+      const channel = new FakeDataChannel(label)
+      this.channels.push(channel)
+      return channel as unknown as RTCDataChannel
+    }
+
     addTrack(track: MediaStreamTrack): RTCRtpSender {
       const sender = { track, replaceTrack: async () => {} } as unknown as RTCRtpSender
       this.senders.push(sender)
@@ -219,6 +282,68 @@ describe('acceptOffer', () => {
   })
 })
 
+describe('trickled candidates', () => {
+  const offerEnvelope = {
+    v: 1 as const,
+    kind: 'offer' as const,
+    peerId: 'peer_remote',
+    sessionId: 'abc123',
+    sdp: SDP_OFFER,
+    label: 'Remote host',
+    createdAt: Date.now(),
+  }
+
+  const candidate = (ip: string): RTCIceCandidateInit => ({
+    candidate: `candidate:1 1 udp 1 ${ip} 1 typ host`,
+    sdpMid: '0',
+    sdpMLineIndex: 0,
+  })
+
+  /**
+   * The regression this exists for.
+   *
+   * The offerer sends its description and its first candidates back-to-back,
+   * so with a live signaling channel the candidates can land while the
+   * answerer is still inside `acceptOffer` and its peer does not exist yet.
+   * Dropping them cost real connections: on a LAN there may be only one or two
+   * candidates, so losing them leaves the peer stuck in `connecting`.
+   */
+  it('buffers candidates that arrive before the peer exists, then applies them', async () => {
+    await manager.addRemoteCandidate('peer_remote', candidate('10.0.0.1'))
+    await manager.addRemoteCandidate('peer_remote', candidate('10.0.0.2'))
+
+    await manager.acceptOffer(offerEnvelope)
+
+    expect(peers[0]!.appliedCandidates.map((entry) => entry.candidate)).toEqual([
+      candidate('10.0.0.1').candidate,
+      candidate('10.0.0.2').candidate,
+    ])
+  })
+
+  it('applies a candidate that arrives after the remote description', async () => {
+    await manager.acceptOffer(offerEnvelope)
+    await manager.addRemoteCandidate('peer_remote', candidate('10.0.0.3'))
+
+    expect(peers[0]!.appliedCandidates).toHaveLength(1)
+  })
+
+  it('discards buffered candidates for a peer that never connects', async () => {
+    await manager.addRemoteCandidate('peer_ghost', candidate('10.0.0.9'))
+    manager.closeAll()
+
+    // Accepting an offer from that id afterwards must not resurrect stale
+    // candidates belonging to an abandoned handshake.
+    await manager.acceptOffer({ ...offerEnvelope, peerId: 'peer_ghost' })
+    expect(peers[0]!.appliedCandidates).toHaveLength(0)
+  })
+
+  it('ignores a candidate for an unknown peer without throwing', async () => {
+    await expect(
+      manager.addRemoteCandidate('peer_nobody', candidate('10.0.0.4')),
+    ).resolves.toBeUndefined()
+  })
+})
+
 describe('acceptAnswer', () => {
   it('applies an answer to the pending offer', async () => {
     const offer = await manager.createOffer()
@@ -263,6 +388,70 @@ describe('acceptAnswer', () => {
     expect(applied).toBe(false)
     expect(lastState().status).toBe('failed')
     expect(lastState().error).toMatch(/no pending connection/i)
+  })
+})
+
+describe('a connection that completes mid-handshake', () => {
+  /**
+   * The regression this exists for.
+   *
+   * `acceptAnswer` reports `connecting` after awaiting
+   * `setRemoteDescription`. With trickle ICE the connection can reach
+   * `connected` during that await — and since a connected peer fires no
+   * further `connectionstatechange`, an optimistic `connecting` written
+   * afterwards is never corrected. The control room showed "Connecting"
+   * forever for a connection that was working.
+   */
+  it('does not let a late progress status overwrite connected', async () => {
+    const offer = await manager.createOffer()
+    connectDuringRemoteDescription = true
+
+    const applied = await manager.acceptAnswer({
+      v: 1 as const,
+      kind: 'answer' as const,
+      peerId: offer!.peerId,
+      sessionId: 'abc123',
+      sdp: SDP_OFFER,
+      label: 'Guest',
+      createdAt: Date.now(),
+    })
+
+    expect(applied).toBe(true)
+    expect(lastState().status).toBe('connected')
+    expect(lastState().connectionState).toBe('connected')
+  })
+
+  it('still reports connecting when the connection has not settled', async () => {
+    const offer = await manager.createOffer()
+
+    await manager.acceptAnswer({
+      v: 1 as const,
+      kind: 'answer' as const,
+      peerId: offer!.peerId,
+      sessionId: 'abc123',
+      sdp: SDP_OFFER,
+      label: 'Guest',
+      createdAt: Date.now(),
+    })
+
+    expect(lastState().status).toBe('connecting')
+  })
+
+  it('a failed connection is not walked back to connecting either', async () => {
+    const offer = await manager.createOffer()
+    peers[0]!.transition('failed')
+
+    await manager.acceptAnswer({
+      v: 1 as const,
+      kind: 'answer' as const,
+      peerId: offer!.peerId,
+      sessionId: 'abc123',
+      sdp: SDP_OFFER,
+      label: 'Guest',
+      createdAt: Date.now(),
+    })
+
+    expect(lastState().status).toBe('failed')
   })
 })
 
@@ -374,19 +563,5 @@ describe('teardown', () => {
 
   it('tolerates closing an unknown peer', () => {
     expect(() => manager.closePeer('peer_ghost')).not.toThrow()
-  })
-})
-
-describe('simulateDisconnect', () => {
-  it('drives the real close path and labels the reason', async () => {
-    const offer = await manager.createOffer()
-    peers[0]!.transition('connected')
-
-    manager.simulateDisconnect(offer!.peerId)
-
-    // The transition is genuine; only the trigger is synthetic.
-    const failed = states.find((state) => state.status === 'failed')
-    expect(failed?.error).toMatch(/simulated/i)
-    expect(manager.getPeer(offer!.peerId)).toBeNull()
   })
 })
