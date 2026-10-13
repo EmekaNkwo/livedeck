@@ -62,6 +62,33 @@ describe('buildPeerConfiguration', () => {
     expect(config.bundlePolicy).toBe('max-bundle')
     expect(config.rtcpMuxPolicy).toBe('require')
   })
+
+  it('puts relay-minted servers ahead of the configured ones', () => {
+    // Order matters on the vanilla-ICE path: gathering blocks the offer, so a
+    // relay waited on last delays every connection that needs it.
+    const config = buildPeerConfiguration(['stun:a.example:3478'], [
+      { urls: ['turn:turn.cloudflare.com:3478'], username: 'u', credential: 'c' },
+    ])
+    expect(config.iceServers?.[0]).toEqual({
+      urls: ['turn:turn.cloudflare.com:3478'],
+      username: 'u',
+      credential: 'c',
+    })
+    expect(config.iceServers).toHaveLength(2)
+  })
+
+  it('preserves a credential containing a colon', () => {
+    // The whole reason these bypass the pipe syntax, which splits on `:`.
+    const config = buildPeerConfiguration([], [
+      { urls: ['turn:turn.cloudflare.com:3478'], username: 'u', credential: 'a:b=' },
+    ])
+    expect((config.iceServers ?? [])[0]?.credential).toBe('a:b=')
+  })
+
+  it('still supplies STUN when no servers were resolved', () => {
+    const config = buildPeerConfiguration([])
+    expect(config.iceServers?.[0]).toEqual({ urls: [...DEFAULT_STUN_URLS] })
+  })
 })
 
 describe('candidate inspection', () => {

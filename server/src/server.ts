@@ -1,6 +1,8 @@
 import { createServer } from 'node:http'
 import next from 'next'
 import { attachSignaling, normalizeOrigin } from './signaling'
+import { createTurnRoute } from './turn-route'
+import { createTurnProvider, readTurnConfig } from './turn'
 
 /**
  * The signaling host: Next.js plus a WebSocket relay in one Node process.
@@ -72,13 +74,26 @@ async function main(): Promise<void> {
     allowedOrigins,
   })
 
-  // Health endpoint, ahead of Next, so a load balancer gets a cheap answer
-  // and so room counts are observable without a dashboard.
+  /*
+   * TURN credentials, minted here because the API token must not reach the
+   * browser. Absent configuration is a supported state — the route answers
+   * `configured: false` and the studio stays STUN-only.
+   */
+  const turnConfig = readTurnConfig(process.env)
+  const turnRoute = createTurnRoute({
+    provider: turnConfig ? createTurnProvider(turnConfig) : null,
+    allowedOrigins,
+  })
+
+  // Endpoints ahead of Next, so a load balancer gets a cheap answer, room
+  // counts are observable without a dashboard, and `/ice-servers` is not
+  // shadowed by a Next 404.
   httpServer.prependListener('request', (request, response) => {
+    if (turnRoute.handle(request, response)) return
     if (request.url !== '/healthz') return
     const stats = signaling.registry.stats()
     response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ ok: true, ...stats }))
+    response.end(JSON.stringify({ ok: true, turn: turnConfig !== null, ...stats }))
   })
 
   /*
@@ -107,6 +122,24 @@ async function main(): Promise<void> {
   httpServer.listen(port, hostname, () => {
     console.log(`[livedeck-signaling] http://${hostname}:${port}`)
     console.log(`[livedeck-signaling] websocket path /signal`)
+    /*
+     * Say which mode TURN is in on startup.
+     *
+     * Without this line, a typo in the key id is indistinguishable from not
+     * having configured TURN at all, and both look identical from the browser:
+     * no relay candidates, connections that fail on restrictive networks.
+     */
+    if (turnConfig) {
+      console.log(
+        `[livedeck-signaling] TURN: Cloudflare key ${turnConfig.keyId.slice(0, 8)}…, ` +
+          `ttl ${turnConfig.ttlSeconds}s, served at GET /ice-servers`,
+      )
+    } else {
+      console.log(
+        '[livedeck-signaling] TURN: not configured (STUN only). Set ' +
+          'CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN to enable relay.',
+      )
+    }
     if (allowedOrigins.length === 0) {
       console.warn(
         '[livedeck-signaling] ALLOWED_ORIGINS is unset: any origin may connect. ' +

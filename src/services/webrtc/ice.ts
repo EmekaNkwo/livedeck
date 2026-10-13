@@ -92,7 +92,19 @@ export function envIceServerUrls(): string[] {
     .map((entry) => (entry.includes('|') || !suffix ? entry : `${entry}${suffix}`))
 }
 
-export function buildPeerConfiguration(iceServerUrls: string[]): RTCConfiguration {
+/**
+ * @param iceServerUrls Settings-shaped strings; see {@link buildIceServers}.
+ * @param resolvedServers Already-structured servers that bypass the string
+ *   format entirely — currently the short-lived Cloudflare TURN credentials
+ *   minted by the relay. They cannot be expressed as
+ *   `turn:host:port|user:pass` because a generated username or credential may
+ *   itself contain a `:`, which that format splits on. See
+ *   `turn-credentials.ts`.
+ */
+export function buildPeerConfiguration(
+  iceServerUrls: string[],
+  resolvedServers: readonly IceServerConfig[] = [],
+): RTCConfiguration {
   // The environment's servers go last so an explicitly configured entry wins a
   // duplicate, and `buildIceServers` still sees a non-empty list either way.
   const merged = [...iceServerUrls]
@@ -100,8 +112,17 @@ export function buildPeerConfiguration(iceServerUrls: string[]): RTCConfiguratio
     if (!merged.includes(url)) merged.push(url)
   }
 
+  /*
+   * Ephemeral servers go first.
+   *
+   * ICE tries servers in order, and these are the ones carrying a working
+   * relay. Putting them ahead of the STUN defaults means a relay candidate is
+   * gathered early rather than after the public STUN servers have been waited
+   * on — which matters on the vanilla-ICE path, where gathering is on the
+   * critical path of producing an offer.
+   */
   return {
-    iceServers: buildIceServers(merged) as RTCIceServer[],
+    iceServers: [...resolvedServers, ...buildIceServers(merged)] as RTCIceServer[],
     // 'all' lets host, srflx and (if configured) relay candidates be used.
     iceTransportPolicy: 'all',
     bundlePolicy: 'max-bundle',

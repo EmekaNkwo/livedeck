@@ -952,17 +952,78 @@ The trade-offs of the vanilla path, which the UI states before you invest in it:
 - **A STUN-only configuration discovers no relay candidates.** Two peers behind
   symmetric NAT, or behind a firewall that blocks UDP, will gather candidates,
   exchange them, fail every connectivity check, and land in `failed`. That is a
-  real network limitation, not a bug, and traversing it requires a TURN server —
-  which would mean running infrastructure this project deliberately does not
-  have. Add your own in **Settings → ICE servers** using
-  `turn:host:port|username:password`. This one is **not** solved by the
-  signaling server: media is peer-to-peer in both transports, so the same NAT
-  limits apply.
+  real network limitation, not a bug, and traversing it requires a TURN relay.
+  The supported fix is [Cloudflare Realtime TURN](#cloudflare-realtime-turn),
+  minted by the relay; a static server also works in **Settings → ICE servers**
+  as `turn:host:port|username:password`. This one is **not** solved by signaling
+  alone: media is peer-to-peer in both transports, so the same NAT limits apply.
 
 After gathering, the candidate set is assessed and reported in plain language:
 relay present → good; public (srflx) present → works on most home and office
 networks, with the symmetric-NAT caveat spelled out; host-only → same network
 only; none → will not connect.
+
+### Cloudflare Realtime TURN
+
+The supported way to get a relay. The signaling server mints **short-lived**
+TURN credentials from Cloudflare and serves them to the studio; the studio puts
+them in front of its STUN servers when it builds a peer connection.
+
+**Setup.** Cloudflare dashboard → Realtime → TURN → create a key. Put the two
+values in `server/.env`:
+
+```bash
+CLOUDFLARE_TURN_KEY_ID=<the "Turn Token ID">
+CLOUDFLARE_TURN_API_TOKEN=<shown once, at creation>
+# Optional. Seconds, default 86400, range 600–172800.
+CLOUDFLARE_TURN_TTL_SECONDS=86400
+```
+
+Nothing to configure in the studio. The credential endpoint is **derived** from
+the signaling relay address, because they are the same process — wherever
+`/signal` is reachable, `/ice-servers` is too. `VITE_ICE_SERVERS_URL` overrides
+that for the one deployment where credentials come from somewhere else.
+
+Restart the relay and check the startup line, which states which mode TURN is
+in. A typo in the key id is otherwise indistinguishable from no configuration
+at all, and both look identical from the browser: no relay candidates.
+
+```
+[livedeck-signaling] TURN: Cloudflare key 2f9c1ab4…, ttl 86400s, served at GET /ice-servers
+[livedeck-signaling] TURN: not configured (STUN only). Set CLOUDFLARE_TURN_KEY_ID and …
+```
+
+**Why the token lives on the server.** The Cloudflare API token can mint
+credentials for your account indefinitely. A `VITE_*` variable is compiled into
+the browser bundle, so putting it there publishes it to anyone who opens
+devtools — your relay bandwidth, your bill. The token stays in the relay
+process; the browser only ever receives a username/credential pair that expires
+on its own. This is the one piece of LiveDeck that genuinely needs a server.
+
+**What it costs in latency.** Credentials are fetched on the path that precedes
+`new RTCPeerConnection`, because ICE servers are fixed at construction and
+WebRTC offers no way to add one to a live connection. That is one HTTP request,
+once: `turn-credentials.ts` caches the grant until five minutes before expiry,
+and `turn.ts` caches it server-side until ten minutes before, so a twelve-guest
+room is one call to Cloudflare rather than twelve. Simultaneous joins on a cold
+cache share a single in-flight request on both sides.
+
+**What happens when it breaks.** Every failure path degrades to STUN-only
+rather than throwing, because a lost relay is a weaker connection while a thrown
+error would abort handshakes that never needed one. The operator gets a toast
+naming the cause — a 403 says to check the token specifically, since a rotated
+token is the common case — and the toast is latched so a down relay raises it
+once rather than once per guest per attempt. A relay with **no** TURN key
+configured is silent: that is the project's default, not a fault, and
+`describeIceFailure` already explains it at the point a connection actually
+fails.
+
+Credentials are passed to `buildPeerConfiguration` as structured
+`IceServerConfig` objects rather than through the
+`turn:host:port|username:password` settings syntax. That format splits the
+credential pair on the first `:`, and a generated Cloudflare username or
+base64 credential may contain one — routing a secret through it would truncate
+it and produce a 401 that looks like a wrong token.
 
 ### Honest status reporting
 
@@ -1389,16 +1450,18 @@ manual two-device testing.
 
 Collected honestly in one place.
 
-1. **STUN-only means some peer connections will fail.** Symmetric NAT or
-   UDP-blocking firewalls need a TURN relay, which this project does not host.
-   **This is the most common cause of "connection failed", and the signaling
-   server does not fix it** — media is peer-to-peer in both transports, so the
-   same NAT limits apply either way. Add a TURN server under
-   Settings › ICE servers as `turn:host:port|username:password`, or set
-   `VITE_TURN_URLS` to bake one in for every device. The studio reports `failed`,
-   and says which of the three cases it was (relay present and still failed,
-   public address only, or host candidates only), rather than faking a connected
-   state.
+1. **Without a TURN relay, some peer connections will fail.** Symmetric NAT or
+   UDP-blocking firewalls need one. **This is the most common cause of
+   "connection failed", and signaling alone does not fix it** — media is
+   peer-to-peer in both transports, so the same NAT limits apply either way.
+   The fix is [Cloudflare Realtime TURN](#cloudflare-realtime-turn): two
+   variables in `server/.env` and the relay mints credentials per connection.
+   A static server also works, under Settings › ICE servers as
+   `turn:host:port|username:password` or baked in via `VITE_TURN_URLS` — but
+   those credentials ship in the browser bundle, so use them only for a relay
+   you do not mind strangers using. Either way the studio reports `failed` and
+   says which of the three cases it was (relay present and still failed, public
+   address only, or host candidates only), rather than faking a connected state.
 2. **In Manual mode, an invite link gets you most of the way, not all of it.**
    The link carries the offer, so the guest needs no setup — but their answer
    still has to come back by hand, because no server can carry it. This is why
@@ -1546,10 +1609,24 @@ not reach each other. The error says which case it is, because the fix differs:
 *public address found but unreachable* is symmetric NAT or a UDP-blocking
 firewall and needs a **TURN server**; *only local-network candidates* means STUN
 itself never answered; *a relay was present and it still failed* points at the
-TURN server's own credentials or reachability. Add TURN under
-Settings › ICE servers as `turn:host:port|username:password`, or set
-`VITE_TURN_URLS`. **Switching to the signaling server does not fix this** —
-media is peer-to-peer either way. See limitation 1.
+TURN server's own credentials or reachability. Set
+`CLOUDFLARE_TURN_KEY_ID` and `CLOUDFLARE_TURN_API_TOKEN` in `server/.env` — see
+[Cloudflare Realtime TURN](#cloudflare-realtime-turn) — or add a static server
+under Settings › ICE servers as `turn:host:port|username:password`. **Switching
+to the signaling server does not fix this** — media is peer-to-peer either way.
+See limitation 1.
+
+**TURN is configured but no relay candidate appears** — Check in this order.
+The relay's startup line states whether it read the Cloudflare key at all; if
+it says *not configured*, the variables are not in that process's environment
+(`server/.env` is not auto-loaded — set them in the shell or your host's
+config). If it says configured, open `GET /ice-servers` on the relay directly:
+`{"configured":false}` means the same thing, a 502 carries the Cloudflare error
+verbatim, and a 200 with URLs means the relay is fine and the studio could not
+reach it — usually `ALLOWED_ORIGINS` missing the studio's origin, which
+withholds the CORS header and makes the fetch fail in the browser only. The
+studio toasts the cause either way; a 403 from Cloudflare specifically means the
+API token is wrong or rotated.
 
 **"Could not reach the signaling server", but the relay is up** — Most likely
 `ALLOWED_ORIGINS` does not contain the studio's origin, and the socket is being

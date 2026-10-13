@@ -1,4 +1,11 @@
-import type { PeerRole, PeerState, PeerStats, PeerStatus, SignalEnvelope } from '@/types/peer'
+import type {
+  IceServerConfig,
+  PeerRole,
+  PeerState,
+  PeerStats,
+  PeerStatus,
+  SignalEnvelope,
+} from '@/types/peer'
 import type {
   AnyChannelMessage,
   ControlChannelState,
@@ -111,6 +118,16 @@ export class PeerConnectionManager {
   private localLabel = 'Host'
   /** Tracks offered to every peer — the host's program feed. */
   private localStream: MediaStream | null = null
+  /**
+   * Short-lived TURN credentials fetched from the relay, if any.
+   *
+   * Held here rather than fetched in {@link createPeer} because constructing an
+   * `RTCPeerConnection` is synchronous and its configuration is fixed at
+   * construction — WebRTC offers no way to add an ICE server to a live
+   * connection. So the fetch happens on the async path that precedes it.
+   */
+  private resolveIceServers: (() => Promise<IceServerConfig[]>) | null = null
+  private resolvedIceServers: readonly IceServerConfig[] = []
 
   configure(options: {
     iceServerUrls: string[]
@@ -121,6 +138,12 @@ export class PeerConnectionManager {
      * Requires a live signaling channel; see `SignalingCapabilities`.
      */
     trickle?: boolean
+    /**
+     * Supplies structured ICE servers — the relay-minted TURN credentials.
+     * Expected to cache and to resolve `[]` rather than reject: no relay is a
+     * degraded connection, not a failed one.
+     */
+    resolveIceServers?: () => Promise<IceServerConfig[]>
     events: Partial<PeerManagerEvents>
   }): void {
     this.iceServerUrls = options.iceServerUrls
@@ -128,6 +151,31 @@ export class PeerConnectionManager {
     this.localLabel = options.localLabel
     this.trickle = options.trickle ?? false
     this.events = options.events
+    if (this.resolveIceServers !== (options.resolveIceServers ?? null)) {
+      // A different resolver means a different relay; its grant does not
+      // transfer, so drop what the previous one supplied.
+      this.resolvedIceServers = []
+    }
+    this.resolveIceServers = options.resolveIceServers ?? null
+  }
+
+  /**
+   * Refresh the ephemeral ICE servers before a connection is constructed.
+   *
+   * Awaited at the top of the offer and answer paths, so a credential fetch
+   * delays a handshake by its own latency once and then not again — the
+   * resolver caches. Never throws: a failure leaves the previous list (or an
+   * empty one) in place and the connection proceeds STUN-only, which is a
+   * weaker connection rather than no connection.
+   */
+  private async refreshIceServers(): Promise<void> {
+    if (!this.resolveIceServers) return
+    try {
+      this.resolvedIceServers = await this.resolveIceServers()
+    } catch {
+      // The resolver is contracted to report its own errors to the operator;
+      // re-reporting here would duplicate the toast.
+    }
   }
 
   /**
@@ -275,6 +323,8 @@ export class PeerConnectionManager {
     peerId: string,
   ): Promise<{ peerId: string; envelope: SignalEnvelope } | null> {
     if (!this.isSupported()) return null
+    // Before `createPeer`: ICE servers cannot be added after construction.
+    await this.refreshIceServers()
     const peer = this.createPeer(peerId, 'host')
     this.setStatus(peer, 'initializing')
 
@@ -333,6 +383,7 @@ export class PeerConnectionManager {
     envelope: SignalEnvelope,
   ): Promise<{ peerId: string; envelope: SignalEnvelope } | null> {
     if (!this.isSupported()) return null
+    await this.refreshIceServers()
     // Reuse the remote peer's id so both sides agree on the identifier.
     const peer = this.createPeer(envelope.peerId, 'guest')
     this.setStatus(peer, 'initializing')
@@ -462,7 +513,9 @@ export class PeerConnectionManager {
     const existing = this.peers.get(peerId)
     if (existing) this.closePeer(peerId)
 
-    const pc = new RTCPeerConnection(buildPeerConfiguration(this.iceServerUrls))
+    const pc = new RTCPeerConnection(
+      buildPeerConfiguration(this.iceServerUrls, this.resolvedIceServers),
+    )
     const control = new ControlChannel(peerId)
     control.setEvents({
       onStateChange: (state) => this.events.onControlState?.(state),

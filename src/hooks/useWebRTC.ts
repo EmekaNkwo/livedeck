@@ -3,7 +3,9 @@ import type { PeerState, SignalEnvelope } from '@/types/peer'
 import { peerManager } from '@/services/webrtc/peer-manager'
 import type { GatheringOutcome } from '@/services/webrtc/ice'
 import { describeConnectivity } from '@/services/webrtc/ice'
+import { createTurnCredentialSource } from '@/services/webrtc/turn-credentials'
 import { extractSignalFromText } from '@/services/signaling/invite-link'
+import { iceServersUrl } from '@/services/signaling/relay-url'
 import { compositor } from '@/services/composition/compositor'
 import { useSourceStore } from '@/stores/sourceStore'
 import { audioMixer } from '@/services/audio/audio-mixer'
@@ -163,6 +165,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   const session = useStudioStore((state) => state.session)
   const showToast = useStudioStore((state) => state.showToast)
   const iceServerUrls = useSettingsStore((state) => state.settings.iceServerUrls)
+  const signalingServerUrl = useSettingsStore((state) => state.settings.signalingServerUrl)
 
   const peerStates = useGuestStore((state) => state.peerStates)
   const setPeerState = useGuestStore((state) => state.setPeerState)
@@ -175,6 +178,27 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
 
   const [connectivity, setConnectivity] = useState<ConnectivityAssessment | null>(null)
   const [busy, setBusy] = useState(false)
+
+  /**
+   * TURN credentials, fetched from the relay that signaling already uses.
+   *
+   * Rebuilt only when the relay address changes, because the source owns a
+   * cache: a new instance per render would re-fetch on every handshake and
+   * defeat it. The toast is the only place a credential problem is visible —
+   * without it, a rotated Cloudflare token presents as connections that fail
+   * on exactly the networks TURN was added for.
+   */
+  const showToastRef = useRef(showToast)
+  showToastRef.current = showToast
+
+  const turnSource = useMemo(
+    () =>
+      createTurnCredentialSource({
+        endpoint: iceServersUrl(signalingServerUrl),
+        onError: (message) => showToastRef.current(message, 'error'),
+      }),
+    [signalingServerUrl],
+  )
 
   /**
    * The room roster, keyed by the relay's peer id.
@@ -344,6 +368,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
       sessionId: session?.id ?? '',
       localLabel: session?.name ?? 'Host',
       trickle,
+      resolveIceServers: () => turnSource.resolve(),
       events: {
         onLocalCandidate: (peerId, candidate) =>
           sendCandidateRef.current(peerId, candidate),
@@ -437,6 +462,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
     setPeerStats,
     showToast,
     trickle,
+    turnSource,
     role,
   ])
 

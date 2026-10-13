@@ -56,6 +56,8 @@ class FakeDataChannel {
 }
 
 type FakePeer = {
+  /** The configuration this connection was constructed with. */
+  config: RTCConfiguration | undefined
   appliedCandidates: RTCIceCandidateInit[]
   connectionState: RTCPeerConnectionState
   iceConnectionState: RTCIceConnectionState
@@ -104,8 +106,16 @@ function installPeerConnection() {
     private senders: RTCRtpSender[] = []
     private transceivers: RTCRtpTransceiver[] = []
 
-    constructor() {
+    /*
+     * Captured because ICE servers are fixed at construction — WebRTC offers
+     * no way to add one to a live connection — so "were the credentials
+     * fetched in time" is only answerable from here.
+     */
+    readonly config: RTCConfiguration | undefined
+
+    constructor(config?: RTCConfiguration) {
       super()
+      this.config = config
       peers.push(this as unknown as FakePeer)
     }
 
@@ -288,6 +298,54 @@ describe('createOffer', () => {
     await manager.setLocalStream(createFakeStream(['video', 'audio']))
     await manager.createOffer()
     expect((peers[0] as unknown as RTCPeerConnection).getSenders().length).toBeGreaterThan(0)
+  })
+
+  /**
+   * Relay-minted TURN credentials must be in the configuration of the very
+   * first connection, not the next one.
+   *
+   * ICE servers are fixed when an `RTCPeerConnection` is constructed, so a
+   * credential fetch that resolves even a tick late is a connection with no
+   * relay — which fails on exactly the symmetric-NAT networks TURN was added
+   * to serve, and looks identical to not having configured TURN at all.
+   */
+  it('awaits the resolved ICE servers before constructing the connection', async () => {
+    const resolved = [
+      { urls: ['turn:turn.cloudflare.com:3478'], username: 'u', credential: 'c' },
+    ]
+    manager.configure({
+      iceServerUrls: ['stun:stun.example:3478'],
+      sessionId: 'abc123',
+      localLabel: 'Host',
+      // Deliberately not pre-resolved: a microtask of latency is enough to
+      // catch a `createPeer` that does not wait.
+      resolveIceServers: async () => {
+        await Promise.resolve()
+        return resolved
+      },
+      events: { onStateChange: (state) => states.push(state) },
+    })
+
+    await manager.createOffer()
+    expect(peers[0]?.config?.iceServers?.[0]).toEqual(resolved[0])
+  })
+
+  it('connects STUN-only when the credential resolver fails', async () => {
+    manager.configure({
+      iceServerUrls: ['stun:stun.example:3478'],
+      sessionId: 'abc123',
+      localLabel: 'Host',
+      resolveIceServers: async () => {
+        throw new Error('relay unreachable')
+      },
+      events: { onStateChange: (state) => states.push(state) },
+    })
+
+    // Losing TURN is a weaker connection, not a failed handshake.
+    const result = await manager.createOffer()
+    expect(result).not.toBeNull()
+    expect(lastState().status).toBe('waiting-for-answer')
+    expect(peers[0]?.config?.iceServers?.[0]).toEqual({ urls: ['stun:stun.example:3478'] })
   })
 
   it('fails with an explanation when createOffer rejects', async () => {
