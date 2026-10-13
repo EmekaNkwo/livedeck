@@ -16,6 +16,10 @@ import { VideoTile, type VideoTileProps } from '@/components/guests/VideoTile'
  * So: one grid, everybody in it, and one cell allowed to be bigger when
  * something genuinely deserves the room.
  *
+ * A shared screen is not in here at all — it gets its own region above the
+ * grid (`SharedScreenView`), because a screen is a different kind of thing
+ * from a face and should not resize everybody else when it starts and stops.
+ *
  * SIZING
  * ------
  * Columns come from the tile count rather than being fixed, so two people get
@@ -27,13 +31,6 @@ import { VideoTile, type VideoTileProps } from '@/components/guests/VideoTile'
 
 export type CallTile = VideoTileProps & {
   key: string
-  /**
-   * Give this tile most of the space.
-   *
-   * For a screen share or a composed program: content that is only useful
-   * large, next to faces that stay readable small.
-   */
-  featured?: boolean
 }
 
 /**
@@ -50,34 +47,29 @@ function columnsFor(count: number): number {
   return 4
 }
 
-export function CallGrid({ tiles }: { tiles: CallTile[] }) {
-  const featured = tiles.find((tile) => tile.featured)
-  const rest = tiles.filter((tile) => tile !== featured)
-
-  if (featured) {
+export function CallGrid({
+  tiles,
+  compact,
+}: {
+  tiles: CallTile[]
+  /**
+   * Yield most of the height to something above — a shared screen.
+   *
+   * A strip rather than a squashed grid: faces stay a readable size and the
+   * row scrolls sideways instead of every tile shrinking as the room grows.
+   */
+  compact?: boolean
+}) {
+  if (compact) {
     return (
-      /*
-       * Featured plus a rail.
-       *
-       * Stacked on a narrow screen, side by side from `lg` — a 3fr/1fr split,
-       * so the featured cell gets three quarters of the width and the rail
-       * stays wide enough for a face to be recognisable. The rail scrolls
-       * rather than shrinking its tiles, so a tenth participant does not make
-       * the other nine unreadable.
-       */
-      <div className="grid min-h-0 flex-1 grid-rows-[1fr_auto] gap-2 lg:grid-cols-[3fr_1fr] lg:grid-rows-1">
-        <VideoTile {...featured} className="min-h-0" />
-        {rest.length > 0 ? (
-          <div className="flex min-h-0 gap-2 overflow-auto lg:flex-col">
-            {rest.map((tile) => (
-              <VideoTile
-                {...tile}
-                key={tile.key}
-                className="aspect-video h-24 shrink-0 sm:h-28 lg:h-auto lg:w-full"
-              />
-            ))}
-          </div>
-        ) : null}
+      <div className="flex shrink-0 gap-2 overflow-x-auto pb-1">
+        {tiles.map((tile) => (
+          <VideoTile
+            {...tile}
+            key={tile.key}
+            className="aspect-video h-24 shrink-0 sm:h-28"
+          />
+        ))}
       </div>
     )
   }

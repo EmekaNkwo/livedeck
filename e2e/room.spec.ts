@@ -164,6 +164,10 @@ test.describe('Scenario E: room-based joining', () => {
       /* ------------- the control channel reaches the guest ------------- */
       // Same assertion as the manual flow: the *guest's own* UI has to flip,
       // which can only happen if the command crossed the data channel.
+      // Joining no longer switches the microphone on, so turn it on here —
+      // the point of this assertion is the director's remote mute, not what
+      // joining does to somebody's hardware.
+      await guest.getByRole('button', { name: 'Turn microphone on' }).click()
       await expect(
         guest.getByRole('button', { name: 'Turn microphone off' }),
       ).toBeVisible({ timeout: 20_000 })

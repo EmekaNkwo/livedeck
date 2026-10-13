@@ -67,6 +67,8 @@ Camera / Screen / Guest sources
 - [Solo links share one feed](#solo-links-share-one-feed)
 - [Invite links (Manual mode)](#invite-links-manual-mode)
 - [URL parameters](#url-parameters)
+- [The director is not in the room](#the-director-is-not-in-the-room)
+- [Nothing starts by itself](#nothing-starts-by-itself)
 - [Who can share a screen](#who-can-share-a-screen)
 - [A room does not need a director](#a-room-does-not-need-a-director)
 - [The guest view is a meeting, not a studio](#the-guest-view-is-a-meeting-not-a-studio)
@@ -355,9 +357,19 @@ including the director's program, where their feed becomes the screen.
 Nothing in WebRTC says what a track is *of* — a shared document and a face
 arrive as the same kind of video — so the sharer reports it over the control
 channel (`{type: 'sharing'}`), validated as strictly as every other message
-because it is remote input that drives layout. Receivers give that tile the
-featured cell. It is re-announced whenever the peer set changes, or somebody
-joining mid-share would lay a shared document out at the size of a face.
+because it is remote input that drives layout. Receivers give it the
+screen region. It is re-announced whenever the peer set changes, or somebody
+joining mid-share would see nothing being shared at all.
+
+The shared screen gets **its own region** above the participant grid, never a
+cell inside it. A screen is a different kind of thing from a face: a different
+shape (a desktop is not 16:9), read rather than glanced at, and only worth
+sharing if it is large. As a grid cell it resized everybody else the instant
+anyone started or stopped, and the layout lurched.
+
+The sharer is never shown their own screen — sharing the tab containing the
+call renders it inside itself, forever — so they get a placeholder, and their
+own tile reports that their camera is not going out.
 
 ### A room does not need a director
 
@@ -371,7 +383,7 @@ connection and glare:
 
 | | Offers to | Why |
 | --- | --- | --- |
-| Director → guest | every guest | It has the initiative: what it sends is the composed program, and it is the one peer guaranteed to be in the room once |
+| Director → guest | every guest | It has the initiative: it is the one peer guaranteed to be in the room exactly once |
 | Guest → guest | the peer with the lesser id | Neither has standing, so the tie breaks on peer id — both sides run the same comparison and reach opposite conclusions, so precisely one offers |
 | Guest → director | never | The director will offer |
 
@@ -386,33 +398,59 @@ mixer — and also what caps the room size: every guest encodes its camera once
 per peer, so cost grows with the square of the room. See
 [Known limitations](#known-limitations).
 
+### The director is not in the room
+
+A control room **receives every guest and sends nothing back**. It has no tile
+in the call, no feed, and no presence in the layout — guests see guests. It
+used to send its composed program to each of them, which encoded the canvas
+once per guest for a feed nobody needed and put a black rectangle (an empty
+program is a black canvas) in the middle of a call the director is not part of.
+
+The peer connection stays, because it carries the guests' media *to* the
+control room and the control channel back — remote mute, cue, on-air tally.
+
+A participant is somebody the **room roster** announced. Identity comes from
+the relay, not from media: an SDP envelope does not carry the sender's name or
+role, so a stream from a peer the room never announced is not rendered as a
+person. Without that rule the control room's own empty m-lines appeared as a
+phantom guest with no video.
+
+### Nothing starts by itself
+
+Joining does not switch on a camera or a microphone. The lobby has a toggle for
+each, and whatever state they are in is what joins — arriving in a room already
+broadcasting is the one decision a conferencing tool must never make for
+somebody. The `AudioContext` is still prepared on the join click, because
+browsers will not start one without a gesture, but preparing a mixer captures
+nothing.
+
+Turning either on later works, which is less obvious than it sounds. Nothing
+here renegotiates — manual signaling could not without another copy/paste
+round, and in a mesh it would mean a fresh offer to every peer — so the m-lines
+present at offer time are all there will ever be. Every connection therefore
+declares **send-capable** audio and video m-lines up front, even with nothing
+to send, and a track that appears later is attached with `replaceTrack`. They
+used to be `recvonly`, which left no sender to put a later track into: a guest
+who joined with their camera off stayed invisible for the whole call however
+many times they pressed the button, and a screen share reached nobody.
+
 ### The guest view is a meeting, not a studio
 
-A **lobby** — set a name, check your camera, join — and then a **call**: the
-director's program feed on the main stage, your own camera as a captioned tile
-over it, and a control bar. The mic and camera controls are split: the left half
-toggles, the right half opens a device picker, because "turn my camera off" and
-"use my *other* camera" are different intentions and burying the second one in
-a settings page is how people join on the wrong device.
+A **lobby** — set a name, check your camera, join — and then a **call**:
+everybody in one grid, including this guest's own camera, and a control bar.
+The mic and camera controls are split: the left half toggles, the right half
+opens a device picker, because "turn my camera off" and "use my *other* camera"
+are different intentions and burying the second one in a settings page is how
+people join on the wrong device.
 
-What the stage shows depends on whether a director is in the room:
+Columns come from the participant count rather than being fixed — two people
+get half the width each, four get a 2×2 — and `grid-auto-rows: 1fr` makes rows
+share the height, because rows sized to content leave a band of dead space
+under the last one.
 
-- **With a director**, the stage is the **composed program** and the other
-  guests sit in a strip beneath it. The program is what is going to air,
-  including this guest framed the way the director framed them, so it gets the
-  space — a participant grid would be a second, parallel answer to "what is
-  happening", and the wrong one to trust. The strip is fixed-height and scrolls
-  horizontally, so a growing room never eats into the program.
-- **With no director**, the room is just a call, so the participants *are* the
-  stage: a grid that follows the room rather than a column count chosen in
-  advance (`auto-fit` with a minimum tile width), so one other person gets the
-  whole width and five share it.
-
-One cell may be **featured**, taking three quarters of the width with the rest
-in a rail: a composed program or a shared screen, both of which are only useful
-large, next to faces that stay readable small. A live screen share outranks the
-program, because the program is always there whereas somebody sharing is a
-thing that just happened.
+A **shared screen** is not in that grid. It gets its own region above it, and
+the grid becomes a scrolling strip of faces beneath. See
+[Who can share a screen](#who-can-share-a-screen).
 
 Both the stage and the tiles are sized to their container, not to the video.
 `max-width`/`max-height` caps an element at its *intrinsic* size, so a 720p
@@ -420,13 +458,13 @@ program sat at 1280×720 in the middle of a wider stage and refused to grow;
 sizing to the container and letting `object-contain` letterbox fills the space
 given without ever distorting the aspect.
 
-### Levels in the lobby, speaking indicators in the call
+### Speaking indicators, not level meters
 
-The lobby has a level meter, because there the question is *is my microphone
-working at all* and a moving bar answers it. Once in the call it is replaced by
-a speaking indicator on the person's own tile — mid-production the useful
-question is *am I being heard*, and a dB reading is a worse answer to that than
-a ring around a face.
+There is no dB meter anywhere in the guest view — not in the lobby, not in the
+call. A level meter answers *how loud*, which is a question for setting up a
+mix; the question a participant actually has is *am I being heard*, and a ring
+around a face answers that better than a moving bar. The mixer in the control
+room still has real meters, because that is where loudness is the point.
 
 The control room shows the same indicator on each guest tile, read from their
 mixer channel. That channel taps **pre-fader**, so a guest muted in the local
@@ -1234,7 +1272,7 @@ similarly for frame rate. The studio does not promise quality it cannot deliver.
 
 ## Testing strategy
 
-468 unit and integration tests (Vitest + React Testing Library) plus 45
+469 unit and integration tests (Vitest + React Testing Library) plus 46
 Playwright browser tests across eight scenarios.
 
 ```bash
@@ -1312,9 +1350,10 @@ image; **G** device pickers, the speaking indicator, and solo sharing —
 including that a copied solo link really decodes the feed it names in a
 *different* window; **H** the guest-to-guest mesh — two guests sent nothing but
 a room link decode each other's video with no control room involved, a third
-joining an existing pair sees both, and the director's program really fills the
-stage rather than sitting at its own resolution in the middle of it, and a
-guest's screen share replacing their camera and taking the featured cell.
+joining an existing pair sees both, two guests share the width evenly, a
+director in the room stays invisible to guests, joining switches nothing on, a
+camera turned on *after* the handshake still reaches the other side, and a
+screen share replaces the sharer's camera and gets its own region.
 
 Scenario D is worth describing in full, because it exercises the parts that are
 easiest to fake. It asserts that the generated link's **fragment really contains

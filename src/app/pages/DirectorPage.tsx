@@ -37,7 +37,19 @@ export function DirectorPage() {
    * which looks exactly like "guests never show up".
    */
   const webrtc = useWebRTC({
-    send: 'program',
+    /*
+     * The control room sends nothing.
+     *
+     * A director works behind the scenes — it is not a participant in the
+     * meeting, and guests do not see it. It used to send its composed program
+     * to every guest, which meant encoding the canvas once per guest for a
+     * feed nobody renders, and put a "director" tile in a call the director is
+     * not in.
+     *
+     * The connection stays, because it carries the guests' media *to* the
+     * control room and the control channel back — remote mute, cue, tally.
+     */
+    send: 'none',
     room,
     role: 'director',
     label: 'Director',

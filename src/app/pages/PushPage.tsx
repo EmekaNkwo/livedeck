@@ -18,7 +18,6 @@ import { Navigate, useLocation, useParams } from 'react-router-dom'
 import { normalizeRoomName } from '@/types/room'
 import { clearSignalFragment, readSignalFromFragment } from '@/services/signaling/invite-link'
 import { streamRegistry } from '@/services/media/stream-registry'
-import { GUEST_SCREEN_KEY } from '@/hooks/useGuestScreenShare'
 import { readJson, writeJson } from '@/services/persistence/local-store'
 import { useCamera } from '@/hooks/useCamera'
 import { useMicrophone } from '@/hooks/useMicrophone'
@@ -36,8 +35,8 @@ import { Button } from '@/components/shared/Button'
 import { DeviceButton } from '@/components/shared/DeviceButton'
 import { TextField } from '@/components/shared/Field'
 import { Notice, StatusDot } from '@/components/shared/Status'
-import { LevelMeter } from '@/components/audio/LevelMeter'
 import { CallGrid, type CallTile } from '@/components/guests/CallGrid'
+import { SharedScreenView, type SharedScreen } from '@/components/guests/SharedScreenView'
 import { VideoTile } from '@/components/guests/VideoTile'
 import { useIsSpeaking } from '@/hooks/useIsSpeaking'
 
@@ -53,21 +52,18 @@ import { useIsSpeaking } from '@/hooks/useIsSpeaking'
  * is a sender, and anything else here is something for a nervous guest to get
  * wrong.
  *
- * EVERYONE IS IN ONE GRID
- * -----------------------
- * Including this guest's own camera. The program, when a director is in the
- * room, is a cell like any other — just a *featured* one, because a composed
- * production is only useful large while faces stay readable small.
+ * THE DIRECTOR IS NOT IN THE ROOM
+ * -------------------------------
+ * A control room conducts from behind the scenes: it receives every guest and
+ * sends nothing back, so it has no tile and no feed here. Guests see guests.
  *
- * This replaced a stage-plus-strip arrangement that described the roles rather
- * than what was worth looking at: a director with no sources started produced
- * an empty program, and an empty program is a black canvas, so the view became
- * one enormous black rectangle with the actual participants tucked into the
- * corners. See `components/guests/CallGrid.tsx`.
- *
- * A room full of guests and no control room is a supported configuration —
- * guests connect to each other in a full mesh — so the grid has to work with
- * no featured cell at all.
+ * A SHARED SCREEN IS NOT A PARTICIPANT
+ * ------------------------------------
+ * It gets its own region above the grid rather than a cell inside it. A screen
+ * is a different kind of thing from a face — a different shape, a different
+ * reason to look at it, and it should not resize everybody else when it starts
+ * and stops. Mixing it into the grid made the whole layout lurch the moment
+ * anyone shared.
  *
  * TWO WAYS IN, AND THE PAGE KNOWS WHICH IT IS
  * -------------------------------------------
@@ -130,6 +126,10 @@ export function PushPage() {
 
   const webrtc = useWebRTC({
     send: 'camera',
+    // A screen share has no *source*, so the outgoing stream is only rebuilt
+    // to carry it because this flag changes. Without it the share played
+    // locally and reached nobody.
+    sharingScreen: screenShare.sharing,
     onControlMessage: guestSession.handleControlMessage,
     // Only once joined. Passing the room before then would announce this guest
     // to the director the instant the page loaded.
@@ -180,24 +180,23 @@ export function PushPage() {
   }, [ready, parameters.autoStart, parameters.noVideo])
 
   /**
-   * Join the room.
+   * Join the room with whatever the guest has actually turned on.
    *
-   * Capture is acquired *before* joining, for two reasons: the click is the
-   * user gesture that lets an AudioContext start at all, and a guest who joins
-   * with no tracks appears in the control room as a connected participant
-   * sending nothing, which looks like a broken connection rather than a
-   * microphone that was never started.
+   * Deliberately starts **nothing**. Joining used to switch on the camera and
+   * microphone for you, which meant arriving in a room broadcasting a room you
+   * had not agreed to broadcast — the one decision a conferencing tool must
+   * never make on somebody's behalf. The lobby has toggles for both; whatever
+   * state they are in is what joins.
+   *
+   * The AudioContext is still initialised here, because this click is a user
+   * gesture and browsers will not start one without it. That only prepares the
+   * mixer — it captures nothing.
    */
   const join = async () => {
     const label = name.trim() || 'Guest'
     setJoining(true)
     try {
-      if (!parameters.noVideo && !camera.active) await camera.start()
-      if (!parameters.noAudio && !microphone.active) {
-        await mixer.initialize()
-        const ok = await microphone.start()
-        if (ok && parameters.startMuted) microphone.setMuted(true)
-      }
+      await mixer.initialize()
       writeJson(NAME_KEY, label)
       setJoinedAs(label)
     } finally {
@@ -359,68 +358,58 @@ export function PushPage() {
    * It is a second rendering of audio the microphone is already capturing, and
    * playing a live microphone back into the room is an acoustic feedback loop.
    */
-  const screenStream = screenShare.sharing
-    ? streamRegistry.getStream(GUEST_SCREEN_KEY)
-    : null
-
+  /**
+   * This guest's own tile — always the camera, never their shared screen.
+   *
+   * Showing somebody their own screen share is how you get the hall of
+   * mirrors: sharing the tab that contains this view renders itself inside
+   * itself, forever. It is also useless — they can see their own screen. While
+   * sharing, the camera is not being sent, so the tile says so.
+   */
   const selfTile: CallTile = {
     key: 'self',
-    // What the room is seeing from this guest: the screen while sharing,
-    // because that is what the outgoing track carries.
-    stream: screenStream ?? (camera.active ? cameraStream : null),
+    stream: camera.active && !screenShare.sharing ? cameraStream : null,
     label: `${displayName} (you)`,
     muted: true,
-    // Never mirror a screen: text would be backwards.
-    mirrored: screenStream ? false : mirroredSelf,
+    mirrored: mirroredSelf,
     speaking,
     micMuted: micOff,
-    ...(screenStream ? { badge: 'sharing' } : {}),
-    emptyLabel: cameraEmptyLabel,
-    featured: Boolean(screenStream),
+    ...(screenShare.sharing ? { badge: 'sharing' } : {}),
+    emptyLabel: screenShare.sharing ? 'Sharing your screen' : cameraEmptyLabel,
   }
 
   /*
-   * The program, when a director is in the room, is the featured cell.
-   *
-   * Labelled rather than left as an unexplained rectangle: an empty program is
-   * a black canvas, and a black cell with a caption is a state you can reason
-   * about, while a black screen is just broken-looking.
+   * Guests only. A control room receives and conducts; it is not a
+   * participant, so it has no tile.
    */
-  const directorParticipant = webrtc.participants.find((entry) => entry.role === 'director')
-  const someoneIsSharing =
-    screenShare.sharing || webrtc.participants.some((entry) => entry.sharingScreen)
+  const guests = webrtc.participants.filter((participant) => participant.role !== 'director')
+
+  /**
+   * The one shared screen, if there is one.
+   *
+   * Only one at a time: two people presenting at once is a social problem, not
+   * a layout problem, and the last to start wins — which is what everyone in
+   * the room just watched happen.
+   */
+  const remoteSharer = guests.find((participant) => participant.sharingScreen) ?? null
+  const sharedScreen: SharedScreen | null = screenShare.sharing
+    ? { label: `${displayName} (you)`, stream: null, isSelf: true }
+    : remoteSharer
+      ? { label: remoteSharer.label, stream: remoteSharer.stream, isSelf: false }
+      : null
+
   const tiles: CallTile[] = [
-    ...(webrtc.programStream
-      ? [
-          {
-            key: 'program',
-            stream: webrtc.programStream,
-            label: 'Program',
-            muted: false,
-            badge: 'director',
-            emptyLabel: 'Waiting for the program',
-            // Yields to a live screen share: the program is always there,
-            // whereas somebody sharing is a thing that just happened.
-            featured: !someoneIsSharing,
-          } satisfies CallTile,
-        ]
-      : []),
-    ...webrtc.participants
-      .filter((participant) => participant !== directorParticipant)
-      .map(
-        (participant): CallTile => ({
-          key: participant.peerId,
-          stream: participant.stream,
-          label: participant.label,
-          // The only thing playing this person's voice.
-          muted: false,
-          emptyLabel: 'Connecting…',
-          ...(participant.sharingScreen ? { badge: 'sharing' } : {}),
-          // A shared screen is only useful large, so it takes the featured
-          // cell — ahead of the program, because somebody shared it *now*.
-          featured: participant.sharingScreen,
-        }),
-      ),
+    ...guests.map(
+      (participant): CallTile => ({
+        key: participant.peerId,
+        stream: participant.stream,
+        label: participant.label,
+        // The only thing playing this person's voice.
+        muted: false,
+        emptyLabel: participant.sharingScreen ? 'Sharing a screen' : 'Connecting…',
+        ...(participant.sharingScreen ? { badge: 'sharing' } : {}),
+      }),
+    ),
     selfTile,
   ]
 
@@ -582,17 +571,6 @@ export function PushPage() {
             */}
             <div className="flex items-center justify-center gap-2">{mediaControls}</div>
 
-            {/*
-              A meter, but only here. In the lobby the question is whether the
-              microphone works at all, and a moving bar answers it directly.
-            */}
-            {microphone.active ? (
-              <div className="flex items-center gap-2 border border-deck-700 bg-deck-900 px-2.5 py-2">
-                <span className="shrink-0 text-[11px] text-ink-400">Your level</span>
-                <LevelMeter channelId={microphone.source?.id ?? null} label="Your microphone" />
-              </div>
-            ) : null}
-
             <TextField
               label="Your name"
               value={name}
@@ -657,7 +635,7 @@ export function PushPage() {
 
           {/* -------------------------------------------------------- grid */}
           <div className="flex min-h-0 flex-1 flex-col gap-2 bg-black p-2">
-            {webrtc.participants.length === 0 && !webrtc.programStream ? (
+            {guests.length === 0 ? (
               /*
                * Alone in the room. Still shows the own tile through the grid
                * below, but leads with what to do about it — a room with one
@@ -686,7 +664,8 @@ export function PushPage() {
               </div>
             ) : null}
 
-            <CallGrid tiles={tiles} />
+            {sharedScreen ? <SharedScreenView screen={sharedScreen} /> : null}
+            <CallGrid tiles={tiles} compact={Boolean(sharedScreen)} />
           </div>
 
           {/* -------------------------------------------------- control bar */}

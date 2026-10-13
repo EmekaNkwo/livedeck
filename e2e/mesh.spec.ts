@@ -26,9 +26,18 @@ async function joinAs(page: Page, room: string, name: string): Promise<void> {
   await join.click()
 }
 
-/** A participant tile, found by the caption naming who it is. */
+/**
+ * A participant tile, found by the caption naming who it is.
+ *
+ * Excludes the shared-screen region, which is also a captioned `figure` naming
+ * the same person — "Ana · sharing a screen" — and would otherwise make every
+ * lookup for Ana ambiguous the moment she shares.
+ */
 function tileFor(page: Page, name: string) {
-  return page.locator('figure').filter({ has: page.getByText(name, { exact: false }) })
+  return page
+    .locator('figure')
+    .filter({ has: page.getByText(name, { exact: false }) })
+    .filter({ hasNotText: 'sharing a screen' })
 }
 
 async function decodesFrames(page: Page, name: string): Promise<void> {
@@ -64,8 +73,7 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
       await decodesFrames(ana, 'Bo')
       await decodesFrames(bo, 'Ana')
 
-      // And neither has a program cell, because there is no director: an
-      // un-featured grid of the people actually in the room.
+      // No program cell, ever: a control room is not a participant.
       await expect(ana.locator('figure').filter({ hasText: 'Program' })).toHaveCount(0)
       await expect(bo.locator('figure').filter({ hasText: 'Program' })).toHaveCount(0)
 
@@ -153,7 +161,15 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
     }
   })
 
-  test('the program is featured, and everyone is still on screen', async ({ browser }) => {
+  /**
+   * A control room in the room changes nothing about what guests see.
+   *
+   * It receives every guest and sends nothing back, so it has no tile and no
+   * feed. It used to send its composed program to each guest, which put a
+   * black rectangle — a program with no sources started is a black canvas — in
+   * the middle of a call the director is not part of.
+   */
+  test('a director in the room is invisible to guests', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     await useSignalingTransport(hostContext, 'server')
@@ -171,25 +187,83 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
 
       await joinAs(guest, 'mesh-featured', 'Ana')
 
-      const program = guest.locator('figure').filter({ hasText: 'Program' })
-      await expect(program).toBeVisible({ timeout: 45_000 })
+      // The control room sees the guest...
+      await expect(
+        host.getByRole('region', { name: 'Guests' }).getByText('Connected', { exact: true }).first(),
+      ).toBeVisible({ timeout: 45_000 })
 
-      const [programBox, selfBox] = await Promise.all([
-        program.boundingBox(),
-        guest.locator('figure').filter({ hasText: '(you)' }).boundingBox(),
-      ])
-
-      // The program gets most of the room — it is a composed production, only
-      // useful large, next to a face that stays readable small.
-      expect(programBox!.width).toBeGreaterThan(selfBox!.width * 2)
-
-      // But the guest is still visible, not pushed off the layout.
-      const viewport = guest.viewportSize()!
-      expect(selfBox!.width).toBeGreaterThan(viewport.width * 0.1)
-      expect(selfBox!.y + selfBox!.height).toBeLessThanOrEqual(viewport.height)
+      // ...and the guest sees only themselves. No program, no director tile.
+      await expect(guest.locator('figure').filter({ hasText: 'Program' })).toHaveCount(0)
+      await expect(guest.locator('figure').filter({ hasText: 'director' })).toHaveCount(0)
+      await expect(guest.locator('figure')).toHaveCount(1)
+      await expect(guest.locator('figure').first()).toContainText('(you)')
     } finally {
       await hostContext.close()
       await guestContext.close()
+    }
+  })
+
+  /**
+   * Joining must not switch anything on.
+   *
+   * It used to start the camera and the microphone for you, which meant
+   * arriving in a room broadcasting a room you had not agreed to broadcast —
+   * the one decision a conferencing tool must never make on somebody's behalf.
+   */
+  test('joining does not turn on a camera or microphone you did not', async ({ browser }) => {
+    const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
+    await useSignalingTransport(context, 'server')
+    const page = await context.newPage()
+
+    try {
+      await joinAs(page, 'mesh-consent', 'Ana')
+
+      // Both controls still read "on" — i.e. they are off and offering to start.
+      await expect(page.getByRole('button', { name: 'Turn camera on' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Turn microphone on' })).toBeVisible()
+
+      // And nothing is live: no track was ever acquired.
+      const live = await page.evaluate(() => {
+        const videos = [...document.querySelectorAll('video')]
+        return videos.filter((v) => v.srcObject !== null).length
+      })
+      expect(live).toBe(0)
+      await expect(page.locator('figure').first()).toContainText('Camera off')
+    } finally {
+      await context.close()
+    }
+  })
+
+  /**
+   * A track that only appears after the connection is established.
+   *
+   * There is no renegotiation anywhere in this project, so the m-lines present
+   * at offer time are all there will ever be. They used to be declared
+   * `recvonly`, which left no sender to put a later track into — so a guest who
+   * joined with their camera off stayed invisible for the whole call however
+   * many times they pressed the button.
+   */
+  test('turning a camera on after joining reaches the other guest', async ({ browser }) => {
+    const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
+    const second = await browser.newContext({ permissions: ['camera', 'microphone'] })
+    await useSignalingTransport(first, 'server')
+    await useSignalingTransport(second, 'server')
+    const ana = await first.newPage()
+    const bo = await second.newPage()
+
+    try {
+      // Both join with nothing running.
+      await joinAs(ana, 'mesh-late', 'Ana')
+      await joinAs(bo, 'mesh-late', 'Bo')
+      await expect(tileFor(bo, 'Ana')).toBeVisible({ timeout: 45_000 })
+
+      // Now Ana starts her camera, well after the handshake completed.
+      await ana.getByRole('button', { name: 'Turn camera on' }).click()
+
+      await decodesFrames(bo, 'Ana')
+    } finally {
+      await first.close()
+      await second.close()
     }
   })
 
@@ -226,91 +300,36 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
 
       await ana.getByRole('button', { name: /Share screen/i }).click()
 
-      // The sharer says so over the control channel — WebRTC itself carries no
-      // hint about what a track is *of*, so without the report the other side
-      // would lay a shared document out at the size of a face.
-      const anaTile = tileFor(bo, 'Ana')
-      await expect(anaTile.getByText('sharing')).toBeVisible({ timeout: 30_000 })
-
-      // And it takes the room: substantially wider than the other cell.
+      /*
+       * The screen reaches the other guest as a *region of its own*, not as a
+       * cell in the participant grid. It used to be a tile, which made the
+       * whole layout lurch the moment anybody shared.
+       */
+      const shared = bo.getByLabel(/is sharing a screen/i)
+      await expect(shared).toBeVisible({ timeout: 45_000 })
       await expect
-        .poll(
-          async () => {
-            const boxes = await bo.locator('figure').evaluateAll((nodes) =>
-              nodes.map((node) => ({
-                w: Math.round((node as HTMLElement).getBoundingClientRect().width),
-                caption: node.querySelector('figcaption')?.textContent ?? '',
-              })),
-            )
-            const shared = boxes.find((box) => box.caption.includes('Ana'))
-            const other = boxes.find((box) => !box.caption.includes('Ana'))
-            if (!shared || !other) return 0
-            return shared.w / Math.max(other.w, 1)
-          },
-          { timeout: 30_000 },
-        )
-        .toBeGreaterThan(1.8)
+        .poll(() => shared.evaluate((el) => (el as HTMLVideoElement).readyState), {
+          timeout: 45_000,
+        })
+        .toBeGreaterThanOrEqual(2)
 
-      // Stopping returns the room to an even grid.
+      // The sharer is told over the control channel — WebRTC carries no hint
+      // about what a track is *of*, so without the report the receiver cannot
+      // tell a shared document from a face.
+      await expect(tileFor(bo, 'Ana').getByText('sharing')).toBeVisible({ timeout: 30_000 })
+
+      // The sharer is never shown their own screen: sharing the tab that holds
+      // this view would render it inside itself, forever.
+      await expect(ana.getByText('You are sharing your screen')).toBeVisible()
+
+      // Stopping puts the room back to an even grid.
       await ana.getByRole('button', { name: /Stop sharing/i }).click()
-      await expect(anaTile.getByText('sharing')).toHaveCount(0, { timeout: 30_000 })
+      await expect(bo.getByLabel(/is sharing a screen/i)).toHaveCount(0, { timeout: 30_000 })
+      await expect(tileFor(bo, 'Ana').getByText('sharing')).toHaveCount(0, { timeout: 30_000 })
     } finally {
       await first.close()
       await second.close()
     }
   })
 
-  test("the director's program fills the stage it is given", async ({ browser }) => {
-    const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
-    const host = await hostContext.newPage()
-    const guest = await guestContext.newPage()
-
-    try {
-      await openDirector(host, 'mesh-stage')
-      await startCamera(host)
-      await openTab(host, /Guests/)
-      await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
-      ).toBeVisible({ timeout: 30_000 })
-
-      await joinAs(guest, 'mesh-stage', 'Ana')
-
-      const stage = guest.getByLabel('Program (director)')
-      await expect(stage).toBeVisible({ timeout: 45_000 })
-      await expect
-        .poll(() => stage.evaluate((el) => (el as HTMLVideoElement).readyState), {
-          timeout: 45_000,
-        })
-        .toBeGreaterThanOrEqual(2)
-
-      /*
-       * The regression this pins.
-       *
-       * The stage used `max-h-full max-w-full`, which caps an element at its
-       * *intrinsic* size — so a 1280-wide program sat at 1280 in the middle of
-       * a wider stage and would not grow. Sizing to the container instead
-       * means the rendered box tracks the space available.
-       */
-      const fit = await stage.evaluate((el) => {
-        const video = el as HTMLVideoElement
-        const parent = video.parentElement
-        return {
-          width: video.clientWidth,
-          parentWidth: parent ? parent.clientWidth : 0,
-          intrinsicWidth: video.videoWidth,
-        }
-      })
-
-      // Wider than the source, which is only possible if it is filling the
-      // container rather than being capped at its own resolution.
-      expect(fit.parentWidth).toBeGreaterThan(fit.intrinsicWidth)
-      expect(fit.width).toBeGreaterThan(fit.parentWidth * 0.95)
-    } finally {
-      await hostContext.close()
-      await guestContext.close()
-    }
-  })
 })

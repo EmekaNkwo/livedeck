@@ -281,12 +281,20 @@ export class PeerConnectionManager {
     try {
       await this.syncSenders(peer)
 
-      // Even with no local tracks we must declare receive-capable m-lines, or
-      // the guest's media has nowhere to land in the answer.
-      if (peer.pc.getTransceivers().length === 0) {
-        peer.pc.addTransceiver('video', { direction: 'recvonly' })
-        peer.pc.addTransceiver('audio', { direction: 'recvonly' })
-      }
+      /*
+       * Always declare **sendrecv** m-lines, even with nothing to send.
+       *
+       * This project never renegotiates — manual signaling could not do it
+       * without another copy/paste round, and in a mesh it would mean a new
+       * offer to every peer. So whatever m-lines exist at offer time are all
+       * there will ever be, and a track that appears later can only be
+       * attached by `replaceTrack` into an existing sender.
+       *
+       * `recvonly` made that impossible: a guest who joined with their camera
+       * off, or who started sharing a screen afterwards, had no sender to put
+       * the track into and nobody ever saw them.
+       */
+      ensureSendRecv(peer.pc)
 
       /*
        * The *offering* side creates the control channel, so its m-line is in
@@ -333,6 +341,16 @@ export class PeerConnectionManager {
       await peer.pc.setRemoteDescription({ type: 'offer', sdp: envelope.sdp })
       peer.hasRemoteDescription = true
       await this.flushCandidates(peer)
+      /*
+       * Answer sendrecv even when there is nothing to send yet.
+       *
+       * The transceivers here come from the offer. Left alone, an answerer
+       * with no camera running answers `recvonly` and can never send anything
+       * for the life of the connection — because there is no renegotiation to
+       * change its mind later. Declaring the intent to send keeps the door
+       * open for `replaceTrack`.
+       */
+      ensureSendRecv(peer.pc)
       await this.syncSenders(peer)
 
       const answer = await peer.pc.createAnswer()
@@ -562,18 +580,31 @@ export class PeerConnectionManager {
    * Uses `replaceTrack` on an existing sender where possible so no new
    * negotiation round is needed.
    */
+  /**
+   * Make this peer's senders match `localStream`.
+   *
+   * Transceivers are matched on the kind of their **m-line**, not on the kind
+   * of whatever track they currently carry. That distinction is the whole
+   * point: a sender with a null track has no `track.kind` to compare against,
+   * so keying off it could never fill an empty sender — which is exactly the
+   * state of a guest who joined with their camera off, or who is about to
+   * start sharing a screen.
+   *
+   * `replaceTrack` is used throughout, so none of this renegotiates.
+   */
   private async syncSenders(peer: Peer): Promise<void> {
     const stream = this.localStream
-    const senders = peer.pc.getSenders()
 
     for (const kind of ['video', 'audio'] as const) {
       const track = stream?.getTracks().find((t) => t.kind === kind) ?? null
-      const sender = senders.find((s) => s.track?.kind === kind) ?? null
+      const transceiver = peer.pc
+        .getTransceivers()
+        .find((entry) => transceiverKind(entry) === kind)
 
-      if (sender) {
-        if (sender.track !== track) {
+      if (transceiver) {
+        if (transceiver.sender.track !== track) {
           try {
-            await sender.replaceTrack(track)
+            await transceiver.sender.replaceTrack(track)
           } catch {
             // replaceTrack can reject if the codecs are incompatible. Leaving
             // the old track in place is better than dropping the sender.
@@ -717,6 +748,37 @@ function describeIceFailure(pc: RTCPeerConnection): string {
     'network. Check that STUN is reachable under Settings › ICE servers, and add a TURN relay ' +
     'for connections across networks.'
   )
+}
+
+/**
+ * The media kind of a transceiver's m-line.
+ *
+ * `sender.track` is null on an empty sender and `receiver.track` is null
+ * before the remote description lands, so neither alone is reliable — but at
+ * least one is always present once a transceiver exists. `mid` is not usable
+ * for this: it identifies the m-line, not what kind it is.
+ */
+function transceiverKind(transceiver: RTCRtpTransceiver): string | null {
+  return transceiver.sender.track?.kind ?? transceiver.receiver.track?.kind ?? null
+}
+
+/**
+ * Declare both m-lines, and declare them send-capable.
+ *
+ * Idempotent: existing transceivers are upgraded in place rather than
+ * duplicated, so calling it on an answer does not add a second video m-line.
+ */
+function ensureSendRecv(pc: RTCPeerConnection): void {
+  for (const kind of ['video', 'audio'] as const) {
+    const existing = pc.getTransceivers().find((entry) => transceiverKind(entry) === kind)
+    if (existing) {
+      if (existing.direction === 'recvonly' || existing.direction === 'inactive') {
+        existing.direction = 'sendrecv'
+      }
+      continue
+    }
+    pc.addTransceiver(kind, { direction: 'sendrecv' })
+  }
 }
 
 function emptyState(peerId: string, role: PeerRole): PeerState {

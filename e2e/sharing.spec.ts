@@ -70,16 +70,19 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
       ).toBeVisible({ timeout: 30_000 })
 
       await guest.goto('/push/g-speaking')
-      // The lobby *does* have a meter: there the question is whether the
-      // microphone works at all.
       await guest.getByRole('button', { name: 'Turn microphone on' }).click()
-      await expect(guest.getByLabel(/Your microphone/i)).toBeVisible({ timeout: 20_000 })
+
+      // No dB meter anywhere in the guest view, lobby included. "Who is
+      // talking" is the question worth answering here, and the indicator on
+      // each person answers it; a moving bar is a measurement nobody in a call
+      // is reading.
+      await expect(guest.getByText('Your level')).toHaveCount(0)
+      await expect(guest.getByLabel(/Your microphone/i)).toHaveCount(0)
 
       await guest.getByLabel('Your name').fill('Ana')
       await guest.getByRole('button', { name: /Join room/i }).click()
       await expect(guestTiles(host)).toHaveCount(1, { timeout: 45_000 })
 
-      // In the call it is gone, replaced by the indicator on the tile.
       await expect(guest.getByText('Your level')).toHaveCount(0)
       await expect(guest.getByLabel(/Your microphone/i)).toHaveCount(0)
 

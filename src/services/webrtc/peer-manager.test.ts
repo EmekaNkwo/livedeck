@@ -143,17 +143,43 @@ function installPeerConnection() {
       return channel as unknown as RTCDataChannel
     }
 
+    /*
+     * Transceivers are modelled with a real sender and receiver, because the
+     * manager matches them on the kind of their *m-line* — reading
+     * `sender.track?.kind ?? receiver.track?.kind` — rather than on whatever
+     * track a sender currently holds. A simpler stub carrying only `kind`
+     * cannot express the case that matters: an empty sender whose m-line is
+     * still a video m-line.
+     */
     addTrack(track: MediaStreamTrack): RTCRtpSender {
       const sender = { track, replaceTrack: async () => {} } as unknown as RTCRtpSender
       this.senders.push(sender)
+      this.transceivers.push({
+        direction: 'sendrecv',
+        sender,
+        receiver: { track: null },
+      } as unknown as RTCRtpTransceiver)
       return sender
     }
     getSenders(): RTCRtpSender[] {
       return this.senders
     }
-    addTransceiver(kind: string): RTCRtpTransceiver {
-      const transceiver = { direction: 'recvonly', kind } as unknown as RTCRtpTransceiver
+    addTransceiver(kind: string, init?: RTCRtpTransceiverInit): RTCRtpTransceiver {
+      const sender = {
+        track: null as MediaStreamTrack | null,
+        replaceTrack: async (next: MediaStreamTrack | null) => {
+          sender.track = next
+        },
+      }
+      const transceiver = {
+        direction: init?.direction ?? 'sendrecv',
+        sender,
+        // A receiver track always reports its kind, which is what makes an
+        // empty sender's m-line identifiable.
+        receiver: { track: { kind } },
+      } as unknown as RTCRtpTransceiver
       this.transceivers.push(transceiver)
+      this.senders.push(sender as unknown as RTCRtpSender)
       return transceiver
     }
     getTransceivers(): RTCRtpTransceiver[] {
@@ -221,11 +247,41 @@ describe('createOffer', () => {
     expect(lastState().status).toBe('waiting-for-answer')
   })
 
-  it('declares receive-capable transceivers when there is no local stream', async () => {
+  /**
+   * Both m-lines, declared send-capable, even with nothing to send.
+   *
+   * This project never renegotiates — manual signaling could not without
+   * another copy/paste round, and in a mesh it would mean a fresh offer to
+   * every peer. So the m-lines present at offer time are all there will ever
+   * be, and a track that appears later can only go into an existing sender via
+   * `replaceTrack`.
+   *
+   * They used to be `recvonly`, which made that impossible: a guest who joined
+   * with their camera off, or who started sharing a screen afterwards, had no
+   * sender to put the track into and nobody ever saw them.
+   */
+  it('declares send-capable transceivers when there is no local stream', async () => {
     await manager.createOffer()
-    // Without these, a guest's media would have nowhere to land.
     expect(peers[0]).toBeDefined()
-    expect((peers[0] as unknown as RTCPeerConnection).getTransceivers()).toHaveLength(2)
+    const transceivers = (peers[0] as unknown as RTCPeerConnection).getTransceivers()
+    expect(transceivers).toHaveLength(2)
+    for (const transceiver of transceivers) {
+      expect(transceiver.direction).toBe('sendrecv')
+    }
+  })
+
+  it('attaches a track that only appears after the offer', async () => {
+    // The screen-share case, and the camera-off-then-on case: no media at
+    // offer time, media later, and no renegotiation in between.
+    await manager.createOffer()
+    await manager.setLocalStream(createFakeStream(['video', 'audio']))
+
+    const sent = (peers[0] as unknown as RTCPeerConnection)
+      .getTransceivers()
+      .map((transceiver) => transceiver.sender.track?.kind)
+      .filter(Boolean)
+      .sort()
+    expect(sent).toEqual(['audio', 'video'])
   })
 
   it('adds the local stream’s tracks as senders when one is set', async () => {

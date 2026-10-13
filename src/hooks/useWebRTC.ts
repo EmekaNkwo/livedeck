@@ -64,6 +64,16 @@ export type UseWebRTCOptions = {
   room?: string
   /** This participant's role in the room. Defaults to `director`. */
   role?: 'director' | 'guest'
+  /**
+   * True while this peer is sharing a screen.
+   *
+   * Not cosmetic — it is a dependency of the outgoing-stream effect. A screen
+   * share lives in the StreamRegistry without a corresponding *source*, so the
+   * source-derived fingerprint below cannot see it, and the outgoing stream
+   * would never be rebuilt to carry it. The share then played locally and
+   * reached nobody.
+   */
+  sharingScreen?: boolean
   /** Display name announced to the room. */
   label?: string
 }
@@ -101,14 +111,7 @@ export type UseWebRTC = {
   participants: RemoteParticipant[]
   /** Tell every peer whether this one is now sharing a screen. */
   announceSharing: (sharing: boolean) => void
-  /**
-   * The director's program output, when a director is in the room.
-   *
-   * Separated from the other participants because it is categorically
-   * different: not a camera but the composed production, which is what a
-   * guest should be watching.
-   */
-  programStream: MediaStream | null
+
   /** Assessment of the last locally-gathered candidate set. */
   connectivity: ConnectivityAssessment | null
   busy: boolean
@@ -150,6 +153,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   const room = options?.room ?? null
   const role = options?.role ?? 'director'
   const label = options?.label ?? 'Peer'
+  const sharingScreen = options?.sharingScreen ?? false
 
   // Held in a ref so a caller passing an inline handler cannot reconfigure the
   // peer manager on every render.
@@ -364,6 +368,21 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
         },
         onRemoteStream: (peerId, stream) => {
           const known = rosterRef.current.get(peerId)
+
+          /*
+           * A participant is somebody the *room* told us about.
+           *
+           * The roster is the only source of identity — an SDP envelope does
+           * not carry the sender's name or role — so a stream from a peer the
+           * room never announced cannot be rendered as a person. That is not a
+           * hypothetical: the manual transport has no roster at all, and since
+           * every connection now declares send-capable m-lines up front, the
+           * director's *empty* ones fire track events too. Without this the
+           * control room appeared in the call as a phantom guest with no
+           * video, which is exactly what a director should never be.
+           */
+          if (!known) return
+
           setParticipantMap((current) => ({
             ...current,
             [peerId]: {
@@ -488,7 +507,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
     }
     // `liveStreamKeys` re-runs this when a capture starts or stops, so a guest
     // that enables its camera after connecting still gets it sent.
-  }, [send, liveStreamKeys])
+  }, [send, liveStreamKeys, sharingScreen])
 
   /**
    * Join the signaling room.
@@ -706,17 +725,12 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   )
 
   const participants = useMemo(() => Object.values(participantMap), [participantMap])
-  const programStream = useMemo(
-    () => participants.find((entry) => entry.role === 'director')?.stream ?? null,
-    [participants],
-  )
 
   return {
     supported: peerManager.isSupported(),
     peers: Object.values(peerStates),
     announceSharing,
     participants,
-    programStream,
     connectivity,
     busy,
     signaling,
