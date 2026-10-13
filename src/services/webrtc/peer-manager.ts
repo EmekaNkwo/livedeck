@@ -48,6 +48,15 @@ export type PeerManagerEvents = {
   onLocalCandidate: (peerId: string, candidate: RTCIceCandidateInit) => void
   /** A remote track arrived; the stream is ready to show and to mix. */
   onRemoteStream: (peerId: string, stream: MediaStream) => void
+  /**
+   * An outgoing track could not be attached to this peer's sender.
+   *
+   * Reported rather than swallowed because the consequence is invisible from
+   * every other signal: the connection stays `connected`, stats keep flowing,
+   * and the only symptom is that nobody can see you. Without this the operator
+   * has nothing to go on.
+   */
+  onLocalTrackError: (peerId: string, message: string) => void
   onRemoteStreamEnded: (peerId: string) => void
   onLocalDescriptionReady: (envelope: SignalEnvelope, outcome: GatheringOutcome) => void
   onStats: (peerId: string, stats: PeerStats) => void
@@ -658,9 +667,25 @@ export class PeerConnectionManager {
         if (transceiver.sender.track !== track) {
           try {
             await transceiver.sender.replaceTrack(track)
-          } catch {
-            // replaceTrack can reject if the codecs are incompatible. Leaving
-            // the old track in place is better than dropping the sender.
+          } catch (error) {
+            /*
+             * Leave the old track in place — better than dropping the sender —
+             * but say so.
+             *
+             * Swallowing this was a genuine trap: `replaceTrack` is how every
+             * later track attachment happens in this project (nothing
+             * renegotiates), so a rejection here means a camera or screen
+             * share that the sender believes is live and no peer can see. The
+             * connection stays `connected` and the stats keep updating, so
+             * there is no other signal that anything is wrong.
+             */
+            this.events.onLocalTrackError?.(
+              peer.id,
+              `Your ${kind} could not be sent to this peer: ${describeError(
+                error,
+                'replaceTrack was rejected.',
+              )}`,
+            )
           }
         }
         continue
@@ -668,8 +693,18 @@ export class PeerConnectionManager {
       if (track && stream) {
         try {
           peer.pc.addTrack(track, stream)
-        } catch {
-          // addTrack throws after the connection is closed; ignore.
+        } catch (error) {
+          // Expected once the connection is closed; only worth reporting while
+          // it is still open, where it means media genuinely failed to attach.
+          if (peer.pc.connectionState !== 'closed') {
+            this.events.onLocalTrackError?.(
+              peer.id,
+              `Your ${kind} could not be added to this peer: ${describeError(
+                error,
+                'addTrack failed.',
+              )}`,
+            )
+          }
         }
       }
     }

@@ -283,15 +283,22 @@ export function PushPage() {
   /*
    * Tell the room when this guest starts or stops sharing.
    *
-   * Re-announced when the peer set changes as well, because somebody who joins
-   * mid-share would otherwise lay the shared screen out as a face until the
-   * sharer happened to toggle it.
+   * Only the *state change* is announced here. Catching up a peer that joins
+   * mid-share is deliberately not this effect's job any more: it used to also
+   * key on `webrtc.participants.length`, which fired the moment the relay
+   * announced somebody — reliably before their data channel was open, and
+   * `ControlChannel.send` drops anything sent before that with no queue. The
+   * message was therefore lost exactly when it mattered, and the share stayed
+   * laid out as a face for the rest of the session.
+   *
+   * `useWebRTC` now replays this to each peer as its channel opens, which is
+   * an ordering that cannot be too early. See `onControlState` there.
    */
   useEffect(() => {
     if (!joinedAs) return
     webrtc.announceSharing(screenShare.sharing)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screenShare.sharing, joinedAs, webrtc.participants.length])
+  }, [screenShare.sharing, joinedAs])
 
   useEffect(() => {
     if (parameters.unknown.length === 0) return

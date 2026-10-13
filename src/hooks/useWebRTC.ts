@@ -215,6 +215,31 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   const peerToGuest = useRef(new Map<string, string>())
 
   /**
+   * What each peer last told us about sharing, held outside the participant map.
+   *
+   * A `sharing` message can arrive before the roster has announced its sender —
+   * the data channel and the room announcement are independent races — and the
+   * participant map cannot hold an entry for somebody it has no identity for.
+   * Dropping the message in that window left a screen share rendered as a face
+   * for the rest of the session, because nothing re-sent it.
+   *
+   * So the fact is recorded here the moment it arrives and read back whenever a
+   * participant entry is built. A ref, not state: it never renders on its own,
+   * and the entry it feeds is always written in the same tick.
+   */
+  const remoteSharingRef = useRef(new Map<string, boolean>())
+
+  /**
+   * Whether *this* peer is sharing, and whether it has ever said so.
+   *
+   * Re-sent to each peer as its control channel opens — see `onControlState`.
+   * The "ever said" flag keeps a role that never shares (a director) from
+   * emitting a message it has no reason to send.
+   */
+  const announcedSharingRef = useRef(false)
+  const hasAnnouncedSharingRef = useRef(false)
+
+  /**
    * A fingerprint of the live camera/microphone captures.
    *
    * Used as an effect dependency so that a guest starting its camera *after*
@@ -277,9 +302,13 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
           peerId: peer.peerId,
           label: peer.label,
           role: peer.role,
-          // Preserve anything that arrived before the announcement.
+          // Preserve anything that arrived before the announcement — including
+          // a `sharing` message, which has its own race with the roster.
           stream: current[peer.peerId]?.stream ?? null,
-          sharingScreen: current[peer.peerId]?.sharingScreen ?? false,
+          sharingScreen:
+            current[peer.peerId]?.sharingScreen ??
+            remoteSharingRef.current.get(peer.peerId) ??
+            false,
         },
       }))
 
@@ -379,12 +408,43 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
           }
         },
         onStats: (peerId, stats) => setPeerStats(peerId, stats),
-        onControlState: (controlState) => setControlState(controlState),
+        onControlState: (controlState) => {
+          setControlState(controlState)
+          /*
+           * Announce sharing when the channel *opens*, not when the roster
+           * changes.
+           *
+           * This is the delivery guarantee the previous trigger lacked. A peer
+           * enters the roster as soon as the relay says so, which is long
+           * before ICE finishes and SCTP brings the data channel to `open` —
+           * and `ControlChannel.send` discards anything sent before then, with
+           * no queue. So the announcement was reliably too early.
+           *
+           * Locally that was invisible: the channel opens in a few milliseconds
+           * over host candidates, so it won the race essentially always. Across
+           * two real networks through a TURN relay it lost it essentially
+           * always, and a screen share was laid out as a face for the rest of
+           * the session because nothing ever re-sent the fact.
+           *
+           * Keyed on the open transition, the message cannot be early.
+           */
+          if (!controlState.open) return
+          if (!hasAnnouncedSharingRef.current) return
+          peerManager.sendControl(controlState.peerId, {
+            v: 1,
+            type: 'sharing',
+            sharing: announcedSharingRef.current,
+          })
+        },
         onControlMessage: (_peerId, message) => onControlMessageRef.current?.(message),
+        onLocalTrackError: (_peerId, message) => showToast(message, 'error'),
         onGuestMessage: (peerId, message) => {
           // The only guest-originated message that changes what the receiver
           // renders. The rest describe track state the control room shows.
           if (message.type !== 'sharing') return
+          // Recorded before the map is touched, so a message that arrives
+          // before the roster announced its sender is not lost.
+          remoteSharingRef.current.set(peerId, message.sharing)
           setParticipantMap((current) => {
             const existing = current[peerId]
             if (!existing) return current
@@ -418,7 +478,10 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
               label: known?.label ?? current[peerId]?.label ?? 'Guest',
               role: known?.role ?? current[peerId]?.role ?? 'guest',
               stream,
-              sharingScreen: current[peerId]?.sharingScreen ?? false,
+              sharingScreen:
+                current[peerId]?.sharingScreen ??
+                remoteSharingRef.current.get(peerId) ??
+                false,
             },
           }))
 
@@ -697,6 +760,16 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
    * toggle.
    */
   const announceSharing = useCallback((sharing: boolean) => {
+    /*
+     * Recorded as well as broadcast.
+     *
+     * The broadcast only reaches peers whose channel is already open; the
+     * record is what `onControlState` replays to every peer that opens later,
+     * which is what makes a guest joining mid-share see a screen rather than a
+     * face. Together they cover both orderings.
+     */
+    announcedSharingRef.current = sharing
+    hasAnnouncedSharingRef.current = true
     peerManager.broadcastControl({ v: 1, type: 'sharing', sharing })
   }, [])
 
@@ -706,6 +779,10 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
       const guestId = peerToGuest.current.get(peerId)
       if (guestId) detachStream(guestId)
       peerToGuest.current.delete(peerId)
+      // Otherwise a peer that was sharing when it left would hand its stale
+      // `true` to whoever reuses the id, and that peer's camera would be
+      // pulled into the shared-screen region instead of the grid.
+      remoteSharingRef.current.delete(peerId)
       removePeer(peerId)
     },
     [detachStream, removePeer],

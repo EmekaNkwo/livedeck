@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PeerState } from '@/types/peer'
+import type { ControlChannelState } from '@/types/room'
 import { resetCapabilitiesCache } from '@/lib/capabilities'
 import { PeerConnectionManager } from './peer-manager'
 import { createFakeStream } from '@/test/setup'
@@ -38,10 +39,20 @@ class FakeDataChannel {
 
   constructor(label: string) {
     this.label = label
-    queueMicrotask(() => {
-      this.readyState = 'open'
-      this.onopen?.()
-    })
+    // Opening on the next microtask approximates localhost, where the channel
+    // is open almost immediately. `deferChannelOpen` suppresses that so a test
+    // can reproduce the *slow* open of a relayed connection across two real
+    // networks — the ordering that localhost never produces and that hid a
+    // dropped-announcement bug for the life of the feature.
+    if (deferChannelOpen) return
+    queueMicrotask(() => this.open())
+  }
+
+  /** Test helper: bring the channel up on command. */
+  open(): void {
+    if (this.readyState === 'open') return
+    this.readyState = 'open'
+    this.onopen?.()
   }
 
   send(data: string): void {
@@ -58,6 +69,8 @@ class FakeDataChannel {
 type FakePeer = {
   /** The configuration this connection was constructed with. */
   config: RTCConfiguration | undefined
+  /** Data channels this connection created, so a test can open them. */
+  channels: FakeDataChannel[]
   appliedCandidates: RTCIceCandidateInit[]
   connectionState: RTCPeerConnectionState
   iceConnectionState: RTCIceConnectionState
@@ -71,6 +84,13 @@ type FakePeer = {
 }
 
 let peers: FakePeer[] = []
+/**
+ * Set by a test to hold every control channel at `connecting` until it says
+ * otherwise, reproducing a slow relayed open.
+ */
+let deferChannelOpen = false
+/** Set by a test to make `sender.replaceTrack` reject. */
+let replaceTrackRejects = false
 /** Set by a test to make createOffer reject. */
 let offerRejects = false
 /** Set by a test to make setRemoteDescription reject. */
@@ -83,6 +103,8 @@ let connectDuringRemoteDescription = false
 
 function installPeerConnection() {
   peers = []
+  deferChannelOpen = false
+  replaceTrackRejects = false
   offerRejects = false
   remoteDescriptionRejects = false
   connectDuringRemoteDescription = false
@@ -178,6 +200,10 @@ function installPeerConnection() {
       const sender = {
         track: null as MediaStreamTrack | null,
         replaceTrack: async (next: MediaStreamTrack | null) => {
+          // The real failure this models: a rejection leaves the sender as it
+          // was, the connection stays `connected`, and nothing else in the
+          // system indicates that nobody can see you.
+          if (replaceTrackRejects) throw new Error('codecs are incompatible')
           sender.track = next
         },
       }
@@ -346,6 +372,78 @@ describe('createOffer', () => {
     expect(result).not.toBeNull()
     expect(lastState().status).toBe('waiting-for-answer')
     expect(peers[0]?.config?.iceServers?.[0]).toEqual({ urls: ['stun:stun.example:3478'] })
+  })
+
+  /**
+   * The ordering localhost never produces.
+   *
+   * A control-channel message sent before the channel opens is discarded with
+   * no queue. Over host candidates the channel opens within a microtask, so an
+   * announcement fired on a roster change essentially always won that race —
+   * which is why every local test and every e2e run passed while the deployed
+   * app failed. Across two networks via a TURN relay the open takes orders of
+   * magnitude longer and the announcement essentially always lost, leaving a
+   * screen share laid out as a face for the rest of the session.
+   *
+   * This pins the two facts the fix depends on: the send really is dropped, and
+   * the open really is observable so it can be used as the trigger instead.
+   */
+  it('drops a broadcast sent before the control channel opens', async () => {
+    deferChannelOpen = true
+    const controlStates: ControlChannelState[] = []
+    manager.configure({
+      iceServerUrls: ['stun:stun.example:3478'],
+      sessionId: 'abc123',
+      localLabel: 'Host',
+      events: {
+        onStateChange: (state) => states.push(state),
+        onControlState: (state) => controlStates.push(state),
+      },
+    })
+
+    await manager.createOffer()
+
+    // The window the old trigger fired in: peer exists, channel does not yet.
+    expect(manager.broadcastControl({ v: 1, type: 'sharing', sharing: true })).toBe(0)
+    expect(controlStates.some((state) => state.open)).toBe(false)
+
+    peers[0]?.channels[0]?.open()
+
+    // The open is reported, which is what makes it usable as the trigger...
+    expect(controlStates.some((state) => state.open)).toBe(true)
+    // ...and a send now actually lands.
+    expect(manager.broadcastControl({ v: 1, type: 'sharing', sharing: true })).toBe(1)
+  })
+
+  /**
+   * A `replaceTrack` rejection used to be swallowed.
+   *
+   * Nothing renegotiates in this project, so `replaceTrack` is how *every*
+   * later track attachment happens — a camera switched on after joining, a
+   * screen share starting. A silent rejection therefore means a track the
+   * sender believes is live that no peer can see, while the connection stays
+   * `connected` and the stats keep updating.
+   */
+  it('reports a replaceTrack failure instead of silently sending nothing', async () => {
+    const trackErrors: string[] = []
+    manager.configure({
+      iceServerUrls: ['stun:stun.example:3478'],
+      sessionId: 'abc123',
+      localLabel: 'Host',
+      events: {
+        onStateChange: (state) => states.push(state),
+        onLocalTrackError: (_peerId, message) => trackErrors.push(message),
+      },
+    })
+
+    await manager.createOffer()
+    replaceTrackRejects = true
+    await manager.setLocalStream(createFakeStream(['video', 'audio']))
+
+    expect(trackErrors.length).toBeGreaterThan(0)
+    expect(trackErrors[0]).toMatch(/could not be sent/)
+    // The cause is named, not just the symptom.
+    expect(trackErrors.join(' ')).toMatch(/codecs are incompatible/)
   })
 
   it('fails with an explanation when createOffer rejects', async () => {
