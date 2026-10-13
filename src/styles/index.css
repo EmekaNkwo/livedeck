@@ -1,0 +1,200 @@
+@import 'tailwindcss';
+
+/*
+ * LiveDeck Studio design tokens.
+ *
+ * A dark broadcast-desk palette: near-black panels, a single amber accent for
+ * "on air", and a cyan accent for selection and focus. Status is never
+ * communicated by colour alone — every state also carries an icon or a text
+ * label, so the interface stays readable for colour-blind operators and in
+ * high-contrast modes.
+ */
+@theme {
+  /* Surfaces, darkest to lightest. */
+  --color-deck-950: #06070a;
+  --color-deck-900: #0a0c11;
+  --color-deck-850: #0e1117;
+  --color-deck-800: #13171f;
+  --color-deck-750: #181d27;
+  --color-deck-700: #1e242f;
+  --color-deck-600: #2a313e;
+  --color-deck-500: #3a424f;
+
+  /* Text. */
+  --color-ink-100: #f3f5f8;
+  --color-ink-200: #dde2ea;
+  --color-ink-300: #b9c1ce;
+  --color-ink-400: #8d97a7;
+  --color-ink-500: #6b7484;
+
+  /* Accents. */
+  --color-accent-400: #35d3e0;
+  --color-accent-500: #1cb8c6;
+  --color-accent-600: #148f9b;
+
+  /* On-air / recording. */
+  --color-live-400: #ff7a59;
+  --color-live-500: #f4542c;
+  --color-live-600: #cf3f1d;
+
+  --color-warn-400: #f5c451;
+  --color-warn-500: #e0a92f;
+
+  --color-ok-400: #4ade80;
+  --color-ok-500: #22c55e;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  --radius-panel: 0.625rem;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-deck-950);
+    color: var(--color-ink-200);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    /* The studio manages its own scroll regions; the page itself never moves. */
+    overflow: hidden;
+  }
+
+  /*
+   * Focus styling is deliberately loud. A production interface is operated
+   * under pressure, and a keyboard user must always be able to see where they
+   * are. :focus-visible keeps it off for mouse clicks.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-accent-400);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* Respect the OS preference for interface animation. Production
+     transitions are configured separately, in the scene settings. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-deck-900);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-deck-600);
+    border-radius: 5px;
+    border: 2px solid var(--color-deck-900);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-deck-500);
+  }
+
+  /* Range inputs are used for every fader and numeric slider, so they get a
+     consistent, touch-friendly treatment rather than the platform default. */
+  input[type='range'] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  input[type='range']::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--color-deck-600);
+  }
+  input[type='range']::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    margin-top: -6px;
+    height: 16px;
+    width: 16px;
+    border-radius: 50%;
+    background: var(--color-ink-100);
+    border: 2px solid var(--color-deck-850);
+  }
+  input[type='range']::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--color-deck-600);
+  }
+  input[type='range']::-moz-range-thumb {
+    height: 14px;
+    width: 14px;
+    border: 2px solid var(--color-deck-850);
+    border-radius: 50%;
+    background: var(--color-ink-100);
+  }
+}
+
+@layer utilities {
+  /* Checkerboard behind the program canvas, so letterboxing is visible as
+     empty space rather than being mistaken for black video. */
+  .bg-canvas-void {
+    background-color: var(--color-deck-950);
+    background-image:
+      linear-gradient(45deg, var(--color-deck-900) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--color-deck-900) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--color-deck-900) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--color-deck-900) 75%);
+    background-size: 16px 16px;
+    background-position:
+      0 0,
+      0 8px,
+      8px -8px,
+      -8px 0;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Visible only to screen readers — used for live-region announcements. */
+  .sr-only-live {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}
+
+/* The recording pulse. Paused rather than removed under reduced motion, so the
+   indicator still reads as "armed" without flashing. */
+@keyframes livedeck-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.animate-live-pulse {
+  animation: livedeck-pulse 1.6s ease-in-out infinite;
+}
