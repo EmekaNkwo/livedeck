@@ -44,6 +44,15 @@ export type UseInviteLink = {
   buildAnswer: (envelope: SignalEnvelope, room: string) => Promise<InviteLink | null>
   /** Build a plain role link with no signaling payload. */
   roleLink: (role: RoomRole, room: string, extra?: Record<string, string>) => string
+  /**
+   * Build a `/solo/:room/:sourceId` link for one feed.
+   *
+   * The share-a-single-source workflow: hand someone one guest's camera, or a
+   * screen share, without giving them the control room. Separate from
+   * `roleLink` because the solo route carries a second path segment rather
+   * than a query parameter.
+   */
+  soloLink: (room: string, sourceId: string) => string
   copy: (text?: string) => Promise<boolean>
   clear: () => void
 }
@@ -117,6 +126,12 @@ export function useInviteLink(): UseInviteLink {
     [],
   )
 
+  const soloLink = useCallback(
+    (room: string, sourceId: string): string =>
+      `${currentOrigin()}/solo/${encodeURIComponent(room)}/${encodeURIComponent(sourceId)}`,
+    [],
+  )
+
   const copy = useCallback(
     async (text?: string): Promise<boolean> => {
       const value = text ?? link?.url
@@ -152,6 +167,7 @@ export function useInviteLink(): UseInviteLink {
     buildGuestInvite,
     buildAnswer,
     roleLink,
+    soloLink,
     copy,
     clear,
   }

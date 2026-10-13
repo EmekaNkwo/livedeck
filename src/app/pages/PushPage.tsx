@@ -30,9 +30,12 @@ import { useWebRTC } from '@/hooks/useWebRTC'
 import { useGuestStore } from '@/stores/guestStore'
 import { useStudioStore } from '@/stores/studioStore'
 import { Button } from '@/components/shared/Button'
-import { SelectField, TextField } from '@/components/shared/Field'
+import { DeviceButton } from '@/components/shared/DeviceButton'
+import { TextField } from '@/components/shared/Field'
 import { Notice, StatusDot } from '@/components/shared/Status'
 import { LevelMeter } from '@/components/audio/LevelMeter'
+import { useIsSpeaking } from '@/hooks/useIsSpeaking'
+import { SpeakingIndicator } from '@/components/audio/SpeakingIndicator'
 
 /**
  * `/push/:room` — the guest view.
@@ -68,6 +71,14 @@ import { LevelMeter } from '@/components/audio/LevelMeter'
  *
  * Director commands arrive over the data channel and are applied to this
  * guest's real tracks, so a remote mute genuinely stops their audio.
+ *
+ * NO METER ONCE YOU ARE IN
+ * ------------------------
+ * The lobby shows a level meter, because there the question is "is my
+ * microphone working at all" and a moving bar is the answer. In the call it is
+ * replaced by a speaking indicator on the person's own tile: mid-production
+ * the useful question is "am I being heard right now", and a dB reading is a
+ * worse answer to that than a ring around your face.
  */
 
 /** Remembered across visits so a rejoin does not mean retyping. */
@@ -102,7 +113,6 @@ export function PushPage() {
   const [joining, setJoining] = useState(false)
   const [answerUrl, setAnswerUrl] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
   const selfViewRef = useRef<HTMLVideoElement | null>(null)
   const stageRef = useRef<HTMLVideoElement | null>(null)
 
@@ -116,6 +126,17 @@ export function PushPage() {
 
   const peerStates = useGuestStore((state) => state.peerStates)
   const peer = Object.values(peerStates)[0] ?? null
+
+  /*
+   * Whether this guest is audible right now.
+   *
+   * Sampled from the meter bus rather than subscribed to it — this drives
+   * conditional markup, so it needs a render, and the meter's own 20Hz rate
+   * would be 20 renders a second for a ring that only has two states.
+   */
+  const speaking = useIsSpeaking(
+    microphone.active && !microphone.muted ? (microphone.source?.id ?? null) : null,
+  )
 
   /** Rooms mean a join control; the manual transport has nothing to join. */
   const roomsSupported = webrtc.signaling.capabilities.supportsRooms
@@ -303,44 +324,6 @@ export function PushPage() {
   const inLobby = roomsSupported && !joinedAs
   const permissionDenied = camera.status === 'denied' || microphone.status === 'denied'
 
-  /* ------------------------------------------------------------ device picks */
-  const deviceControls = (
-    <div className="grid gap-2 sm:grid-cols-2">
-      <SelectField
-        label="Camera"
-        value={camera.deviceId ?? ''}
-        disabled={devices.cameras.length === 0}
-        options={[
-          { value: '', label: devices.cameras.length ? 'System default' : 'No camera found' },
-          ...devices.cameras.map((device) => ({ value: device.deviceId, label: device.label })),
-        ]}
-        onChange={(deviceId) => {
-          if (!deviceId) return
-          void (camera.active ? camera.switchDevice(deviceId) : camera.start(deviceId))
-        }}
-      />
-      <SelectField
-        label="Microphone"
-        value={microphone.deviceId ?? ''}
-        disabled={devices.microphones.length === 0}
-        options={[
-          {
-            value: '',
-            label: devices.microphones.length ? 'System default' : 'No microphone found',
-          },
-          ...devices.microphones.map((device) => ({
-            value: device.deviceId,
-            label: device.label,
-          })),
-        ]}
-        onChange={(deviceId) => {
-          if (!deviceId) return
-          void (microphone.active ? microphone.switchDevice(deviceId) : microphone.start(deviceId))
-        }}
-      />
-    </div>
-  )
-
   /* -------------------------------------------------------------- self video */
   const selfVideo = (
     <>
@@ -393,6 +376,73 @@ export function PushPage() {
   }
 
   const micOff = !microphone.active || microphone.muted
+
+  /**
+   * Switch camera device, starting it if it is off.
+   *
+   * `switchDevice` applies constraints to the live track where the browser
+   * allows it, which avoids a visible drop-out; picking a device while off is
+   * treated as "start on this one" rather than being ignored.
+   */
+  const pickCamera = (deviceId: string) => {
+    void (camera.active ? camera.switchDevice(deviceId) : camera.start(deviceId || undefined))
+  }
+
+  const pickMicrophone = (deviceId: string) => {
+    if (microphone.active) {
+      void microphone.switchDevice(deviceId)
+      return
+    }
+    void (async () => {
+      await mixer.initialize()
+      await microphone.start(deviceId || undefined)
+    })()
+  }
+
+  /** The mic and camera controls, shared by the lobby and the call bar. */
+  const mediaControls = (
+    <>
+      <DeviceButton
+        active={!micOff}
+        onToggle={() => void toggleMicrophone()}
+        label={micOff ? 'Turn microphone on' : 'Turn microphone off'}
+        disabled={parameters.noAudio}
+        devices={devices.microphones.map((device) => ({
+          id: device.deviceId,
+          label: device.label,
+        }))}
+        selectedId={microphone.deviceId ?? ''}
+        onSelect={pickMicrophone}
+        menuLabel="Choose a microphone"
+      >
+        {micOff ? (
+          <MicOff aria-hidden="true" className="h-4 w-4" />
+        ) : (
+          <Mic aria-hidden="true" className="h-4 w-4" />
+        )}
+      </DeviceButton>
+
+      <DeviceButton
+        active={camera.active}
+        onToggle={toggleCamera}
+        label={camera.active ? 'Turn camera off' : 'Turn camera on'}
+        disabled={parameters.noVideo}
+        devices={devices.cameras.map((device) => ({
+          id: device.deviceId,
+          label: device.label,
+        }))}
+        selectedId={camera.deviceId ?? ''}
+        onSelect={pickCamera}
+        menuLabel="Choose a camera"
+      >
+        {camera.active ? (
+          <Video aria-hidden="true" className="h-4 w-4" />
+        ) : (
+          <VideoOff aria-hidden="true" className="h-4 w-4" />
+        )}
+      </DeviceButton>
+    </>
+  )
 
   return (
     <main className="flex h-full flex-col bg-deck-950">
@@ -453,34 +503,16 @@ export function PushPage() {
               {selfVideo}
             </div>
 
-            {/* Pre-join device toggles, the way a meeting lobby works. */}
-            <div className="flex items-center justify-center gap-2">
-              <PillButton
-                active={camera.active}
-                onClick={toggleCamera}
-                disabled={parameters.noVideo}
-                label={camera.active ? 'Turn camera off' : 'Turn camera on'}
-              >
-                {camera.active ? (
-                  <Video aria-hidden="true" className="h-4 w-4" />
-                ) : (
-                  <VideoOff aria-hidden="true" className="h-4 w-4" />
-                )}
-              </PillButton>
-              <PillButton
-                active={!micOff}
-                onClick={() => void toggleMicrophone()}
-                disabled={parameters.noAudio}
-                label={micOff ? 'Turn microphone on' : 'Turn microphone off'}
-              >
-                {micOff ? (
-                  <MicOff aria-hidden="true" className="h-4 w-4" />
-                ) : (
-                  <Mic aria-hidden="true" className="h-4 w-4" />
-                )}
-              </PillButton>
-            </div>
+            {/*
+              Pre-join device controls, the way a meeting lobby works: toggle
+              on the left, pick which device on the right.
+            */}
+            <div className="flex items-center justify-center gap-2">{mediaControls}</div>
 
+            {/*
+              A meter, but only here. In the lobby the question is whether the
+              microphone works at all, and a moving bar answers it directly.
+            */}
             {microphone.active ? (
               <div className="flex items-center gap-2 border border-deck-700 bg-deck-900 px-2.5 py-2">
                 <span className="shrink-0 text-[11px] text-ink-400">Your level</span>
@@ -514,8 +546,6 @@ export function PushPage() {
                 video goes straight to them, not through any server.
               </p>
             )}
-
-            {deviceControls}
 
             {permissionDenied ? <PermissionHelp camera={camera} microphone={microphone} /> : null}
           </div>
@@ -576,9 +606,17 @@ export function PushPage() {
               what the pair means, and it gives the name a real relationship to
               the video instead of being loose text positioned nearby.
             */}
-            <figure className="absolute right-3 bottom-3 m-0 aspect-video w-32 overflow-hidden border border-deck-600 bg-deck-950 shadow-lg sm:w-44">
+            <figure
+              className={cn(
+                'absolute right-3 bottom-3 m-0 aspect-video w-32 overflow-hidden border bg-deck-950 shadow-lg transition-colors sm:w-44',
+                // The ring is the "you are being heard" signal, replacing the
+                // meter that used to sit in the control bar.
+                speaking ? 'border-accent-400' : 'border-deck-600',
+              )}
+            >
               {selfVideo}
-              <figcaption className="absolute bottom-0 left-0 bg-black/60 px-1.5 py-0.5 text-[10px] text-white/80">
+              <figcaption className="absolute bottom-0 left-0 flex items-center gap-1 bg-black/60 px-1.5 py-0.5 text-[10px] text-white/80">
+                <SpeakingIndicator speaking={speaking} muted={micOff} />
                 {displayName}
               </figcaption>
             </figure>
@@ -587,30 +625,7 @@ export function PushPage() {
           {/* -------------------------------------------------- control bar */}
           <div className="flex shrink-0 flex-col gap-2 border-t border-deck-700 bg-deck-900 px-3 py-2">
             <div className="flex items-center justify-center gap-2">
-              <PillButton
-                active={!micOff}
-                onClick={() => void toggleMicrophone()}
-                disabled={parameters.noAudio}
-                label={micOff ? 'Turn microphone on' : 'Turn microphone off'}
-              >
-                {micOff ? (
-                  <MicOff aria-hidden="true" className="h-4 w-4" />
-                ) : (
-                  <Mic aria-hidden="true" className="h-4 w-4" />
-                )}
-              </PillButton>
-              <PillButton
-                active={camera.active}
-                onClick={toggleCamera}
-                disabled={parameters.noVideo}
-                label={camera.active ? 'Turn camera off' : 'Turn camera on'}
-              >
-                {camera.active ? (
-                  <Video aria-hidden="true" className="h-4 w-4" />
-                ) : (
-                  <VideoOff aria-hidden="true" className="h-4 w-4" />
-                )}
-              </PillButton>
+              {mediaControls}
 
               {roomsSupported ? (
                 <Button variant="live" size="sm" onClick={leave}>
@@ -618,25 +633,7 @@ export function PushPage() {
                   Leave
                 </Button>
               ) : null}
-
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-expanded={showSettings}
-                onClick={() => setShowSettings((value) => !value)}
-              >
-                Devices
-              </Button>
             </div>
-
-            {microphone.active ? (
-              <div className="mx-auto flex w-full max-w-sm items-center gap-2">
-                <span className="shrink-0 text-[11px] text-ink-500">Your level</span>
-                <LevelMeter channelId={microphone.source?.id ?? null} label="Your microphone" />
-              </div>
-            ) : null}
-
-            {showSettings ? <div className="mx-auto w-full max-w-xl">{deviceControls}</div> : null}
 
             {permissionDenied ? (
               <div className="mx-auto w-full max-w-xl">
@@ -712,48 +709,6 @@ export function PushPage() {
         </div>
       )}
     </main>
-  )
-}
-
-/**
- * A round meeting-style toggle.
- *
- * `aria-pressed` carries the state rather than colour alone, and the label is
- * always present for a screen reader even though the button shows only an
- * icon.
- */
-function PillButton({
-  active,
-  onClick,
-  disabled,
-  label,
-  children,
-}: {
-  active: boolean
-  onClick: () => void
-  disabled?: boolean
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-pressed={active}
-      aria-label={label}
-      title={label}
-      className={cn(
-        'flex h-10 w-10 items-center justify-center rounded-full border transition-colors',
-        'focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:outline-none',
-        disabled && 'cursor-not-allowed opacity-40',
-        active
-          ? 'border-deck-600 bg-deck-700 text-ink-100 hover:bg-deck-600'
-          : 'border-live-500 bg-live-500/90 text-white hover:bg-live-500',
-      )}
-    >
-      {children}
-    </button>
   )
 }
 

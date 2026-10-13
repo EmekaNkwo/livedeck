@@ -64,8 +64,10 @@ Camera / Screen / Guest sources
 - [Scripts](#scripts)
 - [Browser requirements](#browser-requirements)
 - [Rooms and roles](#rooms-and-roles)
+- [Solo links share one feed](#solo-links-share-one-feed)
 - [Invite links (Manual mode)](#invite-links-manual-mode)
 - [URL parameters](#url-parameters)
+- [The guest view is a meeting, not a studio](#the-guest-view-is-a-meeting-not-a-studio)
 - [Director controls](#director-controls)
 - [Operation modes](#operation-modes)
 - [Architecture](#architecture)
@@ -79,6 +81,7 @@ Camera / Screen / Guest sources
 - [The recording pipeline](#the-recording-pipeline)
 - [WebRTC and signaling](#webrtc-and-signaling)
 - [Signaling transports](#signaling-transports)
+- [Deploying the relay with Docker](#deploying-the-relay-with-docker)
 - [Persistence](#persistence)
 - [Performance decisions](#performance-decisions)
 - [Accessibility](#accessibility)
@@ -240,6 +243,27 @@ own compositor — which still draws everything serializable, like colour
 backgrounds, text and the scene layout — and the hint says plainly that live
 sources need the control room.
 
+### Solo links share one feed
+
+A guest tile has **Share**, and a selected source has **Copy solo link** in the
+properties panel. Both produce `/solo/:room/:sourceId` — that feed alone,
+uncomposed, with no interface.
+
+This is how you hand one camera to somebody without giving them the control
+room: a second operator capturing one guest as a separate layer, or a stream
+that needs the raw feed rather than your composition. The link is tied to the
+room *and* that source id, so it stops resolving when the source is removed
+rather than silently showing a different feed.
+
+It arrives over the same loopback mirror the scene window uses, so the control
+room has to be open in another window — and a solo window opened *before* its
+source is started connects anyway and picks up the track when it appears,
+because the publisher declares the m-lines up front and attaches the track with
+`replaceTrack`.
+
+A solo link is **not** access control, exactly like a room name: anyone holding
+it can open that feed while the control room is publishing.
+
 ## Invite links (Manual mode)
 
 Everything in this section describes the **Manual** transport — the
@@ -311,6 +335,38 @@ documented without being implemented, or vice versa.
 `&autostart` starts the *camera* only. Audio still needs a click, because
 browsers will not start an `AudioContext` without a user gesture — promising
 otherwise would just produce a silent guest.
+
+### The guest view is a meeting, not a studio
+
+A **lobby** — set a name, check your camera, join — and then a **call**: the
+director's program feed on the main stage, your own camera as a captioned tile
+over it, and a control bar. The mic and camera controls are split: the left half
+toggles, the right half opens a device picker, because "turn my camera off" and
+"use my *other* camera" are different intentions and burying the second one in
+a settings page is how people join on the wrong device.
+
+The stage deliberately shows the **composed program** rather than a participant
+grid. The director sends its program output, so a guest sees exactly what is
+going to air, including how they are framed. A grid would be a second, parallel
+answer to "what is happening", and the wrong one to trust.
+
+### Levels in the lobby, speaking indicators in the call
+
+The lobby has a level meter, because there the question is *is my microphone
+working at all* and a moving bar answers it. Once in the call it is replaced by
+a speaking indicator on the person's own tile — mid-production the useful
+question is *am I being heard*, and a dB reading is a worse answer to that than
+a ring around a face.
+
+The control room shows the same indicator on each guest tile, read from their
+mixer channel. That channel taps **pre-fader**, so a guest muted in the local
+mix still registers as speaking — which is exactly how an operator notices
+somebody is talking while muted. A guest who muted their *own* microphone is
+genuinely not audible, and the indicator reports muted instead of speaking.
+
+Detection uses a threshold above room noise plus a short hold, because speech
+has gaps between syllables and a bare threshold test flickers through every one
+of them.
 
 ## Director controls
 
@@ -931,9 +987,9 @@ cannot access the HTTP server's `upgrade` event at all — which is why
 [`server/src/server.ts`](server/src/server.ts) starts Next *programmatically*
 inside a plain Node `http` server that owns that event itself.
 
-So it needs somewhere that runs a persistent process: a VPS, a container, Fly.io,
-Railway, a Node host. The static studio can still be deployed anywhere; only the
-relay has this requirement.
+So it needs somewhere that runs a persistent process: a VPS, a container,
+Fly.io, Railway, Render, a Node host. The static studio can still be deployed
+anywhere; only the relay has this requirement.
 
 Scaling past one process would need shared room state (Redis, say) and sticky
 sessions. That is out of scope here, and the in-memory limits are small enough
@@ -950,6 +1006,68 @@ landing page generates one in the `abc-defg-hij` shape meeting tools use —
 roughly 47 bits, which makes it impractical to guess, but that is obscurity, not
 access control. If it matters, run the relay on a network you control and set
 `ALLOWED_ORIGINS`. The UI states this wherever a room name is shown.
+
+### Deploying the relay with Docker
+
+[`server/Dockerfile`](server/Dockerfile) builds it, and
+[`render.yaml`](render.yaml) is a Render blueprint for it.
+
+**The build context is the repository root, not `server/`.** This is the one
+thing that is easy to get wrong: `server/src/signaling.ts` imports
+`../../shared/signaling-protocol`, because the wire protocol is compiled into
+both the browser client and the server so the two cannot drift. A context of
+`server/` cannot see half of its own source.
+
+```bash
+# from the repository root
+docker build -f server/Dockerfile -t livedeck-signaling .
+docker run --rm -p 3001:3001 -e ALLOWED_ORIGINS=http://localhost:5173 \
+  livedeck-signaling
+```
+
+On Render, as a **Docker** web service — or just apply the blueprint:
+
+| Setting | Value |
+| --- | --- |
+| Dockerfile Path | `./server/Dockerfile` |
+| Docker Build Context Directory | `.` |
+| Health Check Path | `/healthz` |
+| `ALLOWED_ORIGINS` | wherever the studio is served from |
+| Instances | 1 — see below |
+
+Then point the studio at it: **Settings → Signaling → Server address**,
+`wss://your-service.onrender.com`. Or set `VITE_SIGNALING_URL` at build time so
+every device gets it without being configured.
+
+A few decisions the image encodes:
+
+- **`PORT` is honoured, not pinned.** Render injects its own port and the
+  server reads whatever it is given; the image only sets a default so a bare
+  `docker run` works. `HOST` defaults to `0.0.0.0`, because a container's
+  loopback is not reachable from Render's router.
+- **`/healthz` is the health check, not `/`.** It is the relay's own endpoint,
+  registered ahead of Next, and it reports room and peer counts — so a pass
+  means the *relay* is up rather than that something is answering the port.
+  That distinction is not academic: a different process holding the port fails
+  in the most confusing way available, with the WebSocket connecting at the TCP
+  level and then never upgrading.
+- **It runs as the unprivileged `node` user**, and the container is PID 1 so it
+  receives `SIGTERM` directly — the server closes sockets on it and gives up
+  after 5s rather than being killed by the host.
+- **One instance.** Room state lives in one process's memory, so a second
+  instance would split rooms across them: two guests given the same room name
+  could land on different instances and never find each other. Scaling out
+  needs shared state and sticky sessions first.
+- **Platform-wrong native binaries are pruned.** The lockfile lists every
+  platform variant of Next's SWC binding and of sharp's libvips as optional
+  dependencies, and npm installs each one that *could* match — so a glibc base
+  image ships a musl build of each alongside, 174MB that can never load. The
+  glibc SWC binary is deliberately kept: `next.config.ts` is TypeScript and
+  Next transpiles it with SWC at startup, so it is a runtime dependency.
+
+Verified by running the real browser suite against the container: Scenario E
+passes with the studio pointed at the containerized relay rather than a local
+`npm run dev`.
 
 ## Persistence
 
@@ -1037,8 +1155,8 @@ similarly for frame rate. The studio does not promise quality it cannot deliver.
 
 ## Testing strategy
 
-468 unit and integration tests (Vitest + React Testing Library) plus 35
-Playwright browser tests across six scenarios.
+468 unit and integration tests (Vitest + React Testing Library) plus 39
+Playwright browser tests across seven scenarios.
 
 ```bash
 npm test                 # unit + integration
@@ -1099,7 +1217,7 @@ is the production one. The browser tests assert on real pipeline state — canva
 backing-store dimensions, sampled canvas pixels, track `readyState`, registered
 stream counts, compositor frame counts — not just on rendered labels.
 
-The six scenarios: **A** local studio (devices → sources → scene → arrange →
+The seven scenarios: **A** local studio (devices → sources → scene → arrange →
 switch → record → preview → download, including that the blob is decodable by
 the browser's own player and the filename extension matches the real MIME type);
 **B** source composition (camera over screen share, transforms, layer order,
@@ -1111,7 +1229,9 @@ links and peers (Manual mode); **E** room joining (the default), including the
 participant lifecycle — leaving removes a guest, and rejoining or reloading does
 not duplicate them; **F** the scene window, which asserts that the mirrored
 program really decodes *moving* frames rather than showing a single stuck
-image.
+image; **G** device pickers, the speaking indicator, and solo sharing —
+including that a copied solo link really decodes the feed it names in a
+*different* window.
 
 Scenario D is worth describing in full, because it exercises the parts that are
 easiest to fake. It asserts that the generated link's **fragment really contains
@@ -1373,15 +1493,17 @@ src/
 ├── utils/                geometry, snapping, audio math, formatting, errors, ids
 ├── lib/                  capability detection, class-name helper
 └── test/                 browser API stubs for the unit suite
-e2e/                      Playwright scenarios A–F
+e2e/                      Playwright scenarios A–G
 shared/                   the signaling wire protocol — the only code compiled by
                           both the browser client and the server
 server/                   signaling relay (Next.js + ws). Required for guests to
                           join by room link; everything else runs without it
+├── Dockerfile            container image; build context is the repo root
 └── src/
     ├── rooms.ts          room registry, limits, rate limiting (all the logic)
     ├── signaling.ts      WebSocket plumbing, heartbeat, origin checks
     └── server.ts         Node http server that owns `upgrade`, with Next inside
+render.yaml               Render blueprint for the relay
 ```
 
 ---

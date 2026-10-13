@@ -3,10 +3,34 @@
   "compilerOptions": {
     "noEmit": false,
     "outDir": "dist",
+    /*
+     * The repository root, not `src`.
+     *
+     * `src/signaling.ts` imports `../../shared/signaling-protocol` — the wire
+     * protocol is deliberately shared with the browser client so the two
+     * cannot drift. That puts the compilation's common source directory above
+     * this package, and TypeScript refuses to guess what the output layout
+     * should be (TS5011) unless `rootDir` says.
+     *
+     * Setting it explicitly gives a layout that mirrors the repository:
+     *
+     *   dist/server/src/server.js
+     *   dist/shared/signaling-protocol.js
+     *
+     * so the emitted `require('../../shared/signaling-protocol')` resolves at
+     * runtime exactly as it does in source. Hence `npm start` pointing at
+     * `dist/server/src/server.js`.
+     */
+    "rootDir": "..",
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "incremental": false,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    /* A build artifact nobody type-checks again; declarations are dead weight. */
+    "declaration": false,
+    "sourceMap": true
   },
-  "include": ["src"]
+  "include": ["src", "../shared"],
+  /* Tests are run from source by Vitest and have no place in the image. */
+  "exclude": ["src/**/*.test.ts", "../shared/**/*.test.ts"]
 }

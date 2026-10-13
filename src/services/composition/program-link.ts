@@ -25,6 +25,13 @@
  * camera, screen share and guests, rather than a second-hand reconstruction.
  * It is a true mirror.
  *
+ * TARGETS
+ * -------
+ * The same channel serves `/solo/:room/:sourceId`, which needs *one source*
+ * rather than the composition. A subscriber says which it wants, so one
+ * publisher feeds a scene window and any number of solo windows at once, each
+ * with its own peer connection and its own stream.
+ *
  * WHAT IT IS NOT
  * --------------
  * Still not an independent process: the pixels originate in the director's
@@ -32,9 +39,19 @@
  * reports that rather than freezing on a stale frame.
  */
 
+/**
+ * What a subscriber wants.
+ *
+ * `'program'` is the composed output; anything else is a source id, which is
+ * how a solo link asks for a single uncomposed feed.
+ */
+export type ProgramTarget = string
+
+export const PROGRAM_TARGET = 'program'
+
 export type ProgramLinkMessage =
   /** A subscriber announcing itself and asking to be offered a connection. */
-  | { type: 'hello'; from: string }
+  | { type: 'hello'; from: string; target: ProgramTarget }
   /** A publisher announcing itself, so waiting subscribers re-ask. */
   | { type: 'publisher-online' }
   | { type: 'offer'; to: string; sdp: string }
@@ -69,21 +86,32 @@ export function supportsProgramLink(): boolean {
 /* ------------------------------------------------------------------ publish */
 
 /**
- * Publish a stream to every scene window open on this room.
+ * Resolve what a subscriber asked for into a stream to send.
  *
- * One peer connection per subscriber, created on demand. The stream itself is
- * supplied by the caller and never owned here: the compositor's capture
- * belongs to whoever created it, and stopping its tracks from this side would
- * blank the director's own recording.
+ * Returning null is normal and not an error — a solo window can legitimately
+ * open before its source has a live capture. The connection is established
+ * anyway and the track is attached by {@link ProgramLinkPublisher.refresh}
+ * when it appears.
+ */
+export type ProgramStreamResolver = (target: ProgramTarget) => MediaStream | null
+
+/**
+ * Publish to every mirror window open on this room.
+ *
+ * One peer connection per subscriber, created on demand, each remembering the
+ * target it asked for. Streams are *resolved*, never owned: the compositor's
+ * capture and a source's tracks belong to whoever created them, and stopping
+ * them from here would blank the director's own output.
  */
 export class ProgramLinkPublisher {
   private channel: BroadcastChannel | null = null
-  private stream: MediaStream | null = null
-  private readonly peers = new Map<string, RTCPeerConnection>()
+  private readonly peers = new Map<string, { pc: RTCPeerConnection; target: ProgramTarget }>()
   private readonly room: string
+  private resolve: ProgramStreamResolver
 
-  constructor(room: string) {
+  constructor(room: string, resolve: ProgramStreamResolver) {
     this.room = room
+    this.resolve = resolve
   }
 
   start(): void {
@@ -99,20 +127,21 @@ export class ProgramLinkPublisher {
   }
 
   /**
-   * Swap the published stream.
+   * Re-resolve every subscriber's stream.
    *
-   * Existing subscribers are updated with `replaceTrack`, so a scene window
-   * does not have to renegotiate — which matters because the program stream is
-   * rebuilt whenever the output resolution changes.
+   * Called when the program capture is rebuilt (an output resolution change) or
+   * when a source starts or stops. Existing subscribers are updated with
+   * `replaceTrack`, so no mirror window has to renegotiate — a solo window
+   * whose source was not yet live simply starts receiving frames.
    */
-  setStream(stream: MediaStream | null): void {
-    this.stream = stream
-    for (const pc of this.peers.values()) this.syncSenders(pc)
+  refresh(resolve?: ProgramStreamResolver): void {
+    if (resolve) this.resolve = resolve
+    for (const entry of this.peers.values()) this.syncSenders(entry.pc, entry.target)
   }
 
   stop(): void {
     this.post({ type: 'bye' })
-    for (const pc of this.peers.values()) this.closePeer(pc)
+    for (const entry of this.peers.values()) this.closePeer(entry.pc)
     this.peers.clear()
 
     const channel = this.channel
@@ -121,31 +150,33 @@ export class ProgramLinkPublisher {
       channel.onmessage = null
       channel.close()
     }
-    this.stream = null
+    // Resolve to nothing from here on, so a message that races the teardown
+    // cannot hand out a stream this publisher no longer serves.
+    this.resolve = () => null
   }
 
   private async handle(message: ProgramLinkMessage): Promise<void> {
     switch (message.type) {
       case 'hello':
-        await this.offerTo(message.from)
+        await this.offerTo(message.from, message.target ?? PROGRAM_TARGET)
         return
       case 'answer': {
-        const pc = this.peers.get(message.from)
-        if (!pc) return
+        const entry = this.peers.get(message.from)
+        if (!entry) return
         try {
-          await pc.setRemoteDescription({ type: 'answer', sdp: message.sdp })
+          await entry.pc.setRemoteDescription({ type: 'answer', sdp: message.sdp })
         } catch {
           // A subscriber that reloaded mid-handshake; it will say hello again.
-          this.closePeer(pc)
+          this.closePeer(entry.pc)
           this.peers.delete(message.from)
         }
         return
       }
       case 'candidate': {
-        const pc = this.peers.get(message.from)
-        if (!pc) return
+        const entry = this.peers.get(message.from)
+        if (!entry) return
         try {
-          await pc.addIceCandidate(message.candidate)
+          await entry.pc.addIceCandidate(message.candidate)
         } catch {
           // One lost path, not a lost connection.
         }
@@ -156,17 +187,17 @@ export class ProgramLinkPublisher {
     }
   }
 
-  private async offerTo(subscriberId: string): Promise<void> {
+  private async offerTo(subscriberId: string, target: ProgramTarget): Promise<void> {
     // A repeated hello means the subscriber restarted, so discard the old
     // connection rather than leaving it running with nothing attached.
     const previous = this.peers.get(subscriberId)
     if (previous) {
-      this.closePeer(previous)
+      this.closePeer(previous.pc)
       this.peers.delete(subscriberId)
     }
 
     const pc = new RTCPeerConnection(LOOPBACK_CONFIG)
-    this.peers.set(subscriberId, pc)
+    this.peers.set(subscriberId, { pc, target })
 
     pc.onicecandidate = (event) => {
       if (!event.candidate) return
@@ -183,11 +214,17 @@ export class ProgramLinkPublisher {
       this.peers.delete(subscriberId)
     }
 
-    this.syncSenders(pc)
-    // Declare a video m-line even with nothing to send yet, so the connection
-    // is usable the moment a stream arrives.
+    this.syncSenders(pc, target)
+    /*
+     * Declare send-only m-lines even with nothing to send yet.
+     *
+     * This is what lets a solo window open *before* its source is live: the
+     * connection completes now, and `refresh` attaches the track later with
+     * `replaceTrack` instead of needing a second negotiation round.
+     */
     if (pc.getTransceivers().length === 0) {
       pc.addTransceiver('video', { direction: 'sendonly' })
+      pc.addTransceiver('audio', { direction: 'sendonly' })
     }
 
     try {
@@ -200,18 +237,34 @@ export class ProgramLinkPublisher {
     }
   }
 
-  private syncSenders(pc: RTCPeerConnection): void {
-    const senders = pc.getSenders()
-    for (const kind of ['video', 'audio'] as const) {
-      const track = this.stream?.getTracks().find((entry) => entry.kind === kind) ?? null
-      const sender = senders.find((entry) => entry.track?.kind === kind) ?? null
-      if (sender) {
-        if (sender.track !== track) void sender.replaceTrack(track).catch(() => {})
+  private syncSenders(pc: RTCPeerConnection, target: ProgramTarget): void {
+    const stream = this.resolve(target)
+    /*
+     * Transceivers are indexed by position, matched to the order they were
+     * declared in (video, then audio).
+     *
+     * Keying off `sender.track?.kind` could never fill an *empty* sender,
+     * because a null track has no kind to compare against — and an empty
+     * sender is exactly the state a solo window starts in when its source is
+     * not live yet.
+     */
+    const transceivers = pc.getTransceivers()
+    const kinds = ['video', 'audio'] as const
+
+    for (let index = 0; index < kinds.length; index += 1) {
+      const kind = kinds[index]!
+      const track = stream?.getTracks().find((entry) => entry.kind === kind) ?? null
+      const transceiver = transceivers[index] ?? null
+
+      if (transceiver) {
+        if (transceiver.sender.track !== track) {
+          void transceiver.sender.replaceTrack(track).catch(() => {})
+        }
         continue
       }
-      if (track && this.stream) {
+      if (track && stream) {
         try {
-          pc.addTrack(track, this.stream)
+          pc.addTrack(track, stream)
         } catch {
           // The connection closed underneath us.
         }
@@ -263,10 +316,16 @@ export class ProgramLinkSubscriber {
 
   private readonly room: string
   private readonly events: ProgramLinkSubscriberEvents
+  private readonly target: ProgramTarget
 
-  constructor(room: string, events: ProgramLinkSubscriberEvents) {
+  constructor(
+    room: string,
+    events: ProgramLinkSubscriberEvents,
+    target: ProgramTarget = PROGRAM_TARGET,
+  ) {
     this.room = room
     this.events = events
+    this.target = target
   }
 
   start(): void {
@@ -283,11 +342,11 @@ export class ProgramLinkSubscriber {
     }
 
     this.setState('waiting')
-    this.post({ type: 'hello', from: this.id })
+    this.post({ type: 'hello', from: this.id, target: this.target })
     this.helloTimer = setInterval(() => {
       // Only while nothing is attached; a live mirror must not be disturbed.
       if (this.state === 'live' || this.state === 'connecting') return
-      this.post({ type: 'hello', from: this.id })
+      this.post({ type: 'hello', from: this.id, target: this.target })
     }, 1500)
   }
 
@@ -310,7 +369,7 @@ export class ProgramLinkSubscriber {
     switch (message.type) {
       case 'publisher-online':
         if (this.state === 'waiting' || this.state === 'ended') {
-          this.post({ type: 'hello', from: this.id })
+          this.post({ type: 'hello', from: this.id, target: this.target })
         }
         return
 
@@ -360,7 +419,30 @@ export class ProgramLinkSubscriber {
     }
     pc.ontrack = (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track])
-      this.events.onStream(stream)
+      const track = event.track
+
+      /**
+       * Only surface a stream that is actually carrying media.
+       *
+       * `ontrack` fires for every m-line in the remote description, including
+       * a send-only one the publisher declared with **no track attached** —
+       * which it does deliberately, so a solo window can connect before its
+       * source is live. The resulting receiver track is `live` but `muted`,
+       * and handing it to a `<video>` renders a permanently black frame that
+       * is indistinguishable from a working feed showing nothing.
+       *
+       * So the mute state is the signal, in both directions: a source being
+       * started unmutes the track, and stopping it mutes the track again,
+       * which is reported as "no feed" rather than freezing on the last frame.
+       */
+      const publish = () => {
+        this.events.onStream(track.muted ? null : stream)
+      }
+
+      track.addEventListener('unmute', publish)
+      track.addEventListener('mute', publish)
+      track.addEventListener('ended', () => this.events.onStream(null))
+      publish()
     }
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') this.setState('live')

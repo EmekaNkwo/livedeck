@@ -130,6 +130,7 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
    * owns a program output.
    */
   useProgramPublisher(room)
+
   const director = useDirectorControl()
   const solo = useSolo()
   const scenes = useSceneManager()
@@ -142,6 +143,31 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
   const openDialog = useStudioStore((state) => state.openDialog)
   const requestConfirm = useStudioStore((state) => state.requestConfirm)
   const transform = useSourceTransform(selectedSourceId)
+
+  /**
+   * Copy a solo link for one feed.
+   *
+   * The share-a-single-source workflow: a link to one guest or one source,
+   * uncomposed, that someone else can open or capture without being given the
+   * control room. The link is tied to this room *and* that source id, so it
+   * stops resolving when the source is removed rather than silently showing a
+   * different feed.
+   */
+  const shareSource = useCallback(
+    async (sourceId: string, label: string) => {
+      const url = invite.soloLink(room, sourceId)
+      const copied = await invite.copy(url)
+      // Read off the store rather than subscribing: a toast is fire-and-forget
+      // and subscribing here would re-render the whole control room.
+      useStudioStore.getState().showToast(
+        copied
+          ? `Solo link for ${label} copied. It shows that feed alone, with no interface.`
+          : `Solo link for ${label}: ${url}`,
+        copied ? 'success' : 'error',
+      )
+    },
+    [invite, room],
+  )
 
   const deleteSelection = useCallback(() => {
     if (!selectedSourceId) return
@@ -376,6 +402,10 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
                         }}
                         onAddToScene={() => {
                           if (view.videoSourceId) sources.addToActiveScene(view.videoSourceId)
+                        }}
+                        onShare={() => {
+                          if (!view.videoSourceId) return
+                          void shareSource(view.videoSourceId, view.guest.name)
                         }}
                         onRemove={() => guests.requestRemoveGuest(view.guest.id)}
                       />

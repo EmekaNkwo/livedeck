@@ -138,8 +138,9 @@ test.describe('Scenario D: invite links and peer connections', () => {
 
       // No name is baked into the link any more — the guest is anonymous until
       // they say otherwise, and the manual flow has no join screen to ask on.
-      // The name captions their own self-view tile.
-      await expect(guest.locator('figcaption')).toHaveText('Guest')
+      // The name captions their own self-view tile. `toContainText`, because
+      // the caption also carries the speaking indicator's screen-reader text.
+      await expect(guest.locator('figcaption')).toContainText('Guest')
 
       await guest.getByRole('button', { name: 'Turn camera on' }).click()
 

@@ -1,0 +1,56 @@
+# Docker build context, for `server/Dockerfile`.
+#
+# The context is the repository ROOT, because the relay's source imports
+# `../../shared/signaling-protocol`. That means the studio's whole tree is in
+# scope by default, so most of this file is about keeping it out — a smaller
+# context is a faster upload and a better layer cache.
+#
+# `shared/` and `server/` are the two directories that must NOT be excluded.
+
+# ----------------------------------------------------------- never ship these
+**/node_modules
+**/.git
+**/.gitignore
+
+# Build output. The image builds its own from source; copying a host build in
+# would produce an image whose contents depend on whoever ran docker build.
+dist
+server/dist
+server/.next
+.next
+
+# Local environment. Secrets and ports belong in the host's configuration, not
+# baked into a layer where anyone who can pull the image can read them.
+**/.env
+**/.env.*
+!**/.env.example
+
+# --------------------------------------------- the studio, which is not the relay
+# The browser client is deployed as static files elsewhere; the relay needs
+# none of it. `shared/` is the only code the two have in common.
+src
+e2e
+public
+index.html
+vite.config.ts
+playwright.config.ts
+tsconfig.json
+tsconfig.app.json
+tsconfig.node.json
+.oxlintrc.json
+package.json
+package-lock.json
+
+# --------------------------------------------------------------- test artefacts
+test-results
+playwright-report
+blob-report
+playwright/.cache
+coverage
+
+# ------------------------------------------------------------------ editor/local
+.vscode
+.idea
+.DS_Store
+*.log
+README.md

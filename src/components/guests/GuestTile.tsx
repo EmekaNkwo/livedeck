@@ -6,6 +6,7 @@ import {
   MicOff,
   MonitorOff,
   Radio,
+  Share2,
   Video,
   VideoOff,
   X,
@@ -16,6 +17,8 @@ import type { GuestView } from '@/hooks/useGuests'
 import { cn } from '@/lib/cn'
 import { formatMetric } from '@/utils/format'
 import { Button } from '@/components/shared/Button'
+import { useIsSpeaking } from '@/hooks/useIsSpeaking'
+import { SpeakingIndicator } from '@/components/audio/SpeakingIndicator'
 import { StatusDot } from '@/components/shared/Status'
 import type { StatusTone } from '@/components/shared/Status'
 
@@ -43,6 +46,13 @@ export type GuestTileProps = {
   onToggleLocalMute: () => void
   onToggleLocalHide: () => void
   onSolo: () => void
+  /**
+   * Copy a solo link for this guest's feed.
+   *
+   * Disabled when there is no video source, because a link to a feed that
+   * does not exist would open a window that can only say so.
+   */
+  onShare: () => void
   onRemove: () => void
   onAddToScene: () => void
   inScene: boolean
@@ -58,6 +68,7 @@ export function GuestTile({
   onToggleLocalMute,
   onToggleLocalHide,
   onSolo,
+  onShare,
   onRemove,
   onAddToScene,
   inScene,
@@ -102,15 +113,28 @@ export function GuestTile({
   const micMuted = control?.reportedMicMuted
   const cameraMuted = control?.reportedCameraMuted
 
+  /*
+   * Is this guest talking right now?
+   *
+   * Read from their mixer channel, which taps *pre-fader* — so a guest muted
+   * in the local mix still registers as speaking. That is the point: it is how
+   * an operator notices someone is talking while muted. A guest who muted
+   * their own microphone genuinely is not audible, and `muted` below reports
+   * that instead.
+   */
+  const speaking = useIsSpeaking(view.audioSourceId)
+
   return (
     <li
       className={cn(
-        'flex flex-col border bg-deck-900',
+        'flex flex-col border bg-deck-900 transition-colors',
         soloed
           ? 'border-accent-500 ring-1 ring-accent-500'
-          : connected
-            ? 'border-deck-600'
-            : 'border-deck-700',
+          : speaking && !micMuted
+            ? 'border-accent-400 ring-1 ring-accent-400/60'
+            : connected
+              ? 'border-deck-600'
+              : 'border-deck-700',
       )}
     >
       {/* ------------------------------------------------------- preview */}
@@ -176,6 +200,7 @@ export function GuestTile({
       {/* --------------------------------------------------------- header */}
       <div className="flex items-center gap-1.5 border-t border-deck-700 px-2 py-1.5">
         <StatusDot tone={tone} label={statusLabel} iconOnly />
+        <SpeakingIndicator speaking={speaking} muted={Boolean(micMuted)} />
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-100">
           {guest.name}
         </span>
@@ -303,6 +328,16 @@ export function GuestTile({
           >
             <Maximize2 aria-hidden="true" className="h-3 w-3" />
             Solo
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!view.videoSourceId}
+            onClick={onShare}
+            title="Copy a link to this guest's feed on its own"
+          >
+            <Share2 aria-hidden="true" className="h-3 w-3" />
+            Share
           </Button>
         </div>
         {!inScene && view.videoSourceId ? (

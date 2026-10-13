@@ -9,11 +9,15 @@ import {
   MousePointer2,
   RotateCcw,
   Scan,
+  Share2,
 } from 'lucide-react'
+import { useCallback } from 'react'
 import type { AlignEdge } from '@/utils/geometry'
+import { isVisualSource } from '@/types/source'
 import { SOURCE_TYPE_LABEL } from '@/services/sources/source-factory'
 import { DEFAULT_TEXT_STYLE } from '@/services/composition/compositor'
 import { useSourceTransform } from '@/hooks/useSourceTransform'
+import { useInviteLink } from '@/hooks/useInviteLink'
 import { useMediaSources } from '@/hooks/useMediaSources'
 import { useStudioSettings } from '@/hooks/useStudioSettings'
 import { useSourceStore } from '@/stores/sourceStore'
@@ -48,6 +52,31 @@ export function PropertiesPanel() {
   const transform = useSourceTransform(selectedSourceId)
   const { updateSettings, renameSource } = useMediaSources()
   const { canvasSize } = useStudioSettings()
+
+  const invite = useInviteLink()
+  // The room is the session id, so the panel can build its own share link.
+  const room = useStudioStore((state) => state.session?.id ?? null)
+
+  /**
+   * Copy a solo link for the selected source.
+   *
+   * Lives here rather than in the Sources list because the list's rows are
+   * already carrying seven icon buttons in a narrow panel — an eighth made the
+   * row almost entirely controls, to the point where clicking it to *select*
+   * the source started hitting a button instead. This panel has room for a
+   * labelled control, and you are already here when you care about one source.
+   */
+  const shareSource = useCallback(async () => {
+    if (!room || !source) return
+    const url = invite.soloLink(room, source.id)
+    const copied = await invite.copy(url)
+    useStudioStore.getState().showToast(
+      copied
+        ? `Solo link for ${source.name} copied. It shows that feed alone, with no interface.`
+        : `Solo link for ${source.name}: ${url}`,
+      copied ? 'success' : 'error',
+    )
+  }, [invite, room, source])
 
   return (
     <Panel
@@ -429,6 +458,33 @@ export function PropertiesPanel() {
               affects the preview; the per-scene “Mirror horizontally” option above affects the
               composed output.
             </Notice>
+          ) : null}
+
+          {/*
+            Share one feed on its own.
+
+            Only offered for sources with something to look at: a solo link to
+            an audio-only source would open a window that can never show
+            anything, which is worse than not offering it.
+          */}
+          {isVisualSource(source.type) ? (
+            <div className="flex flex-col gap-1.5 border-t border-deck-700 pt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                className="self-start"
+                onClick={() => void shareSource()}
+                aria-label={`Copy a solo link for ${source.name}`}
+              >
+                <Share2 aria-hidden="true" className="h-3.5 w-3.5" />
+                Copy solo link
+              </Button>
+              <p className="text-[10px] leading-relaxed text-ink-500">
+                A link to this feed alone — uncomposed, no interface — for capturing it separately
+                or handing it to someone without giving them the control room. It needs this
+                control room open to send the feed.
+              </p>
+            </div>
           ) : null}
         </div>
       )}

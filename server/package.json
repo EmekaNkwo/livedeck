@@ -2,11 +2,14 @@
   "name": "livedeck-signaling",
   "private": true,
   "version": "1.0.0",
+  "engines": {
+    "node": ">=20.9"
+  },
   "description": "Optional room-based WebRTC signaling relay for LiveDeck Studio. Next.js + ws.",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "next build && tsc -p tsconfig.build.json",
-    "start": "node dist/server.js --prod",
+    "start": "node dist/server/src/server.js --prod",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
