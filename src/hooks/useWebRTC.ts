@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PeerState, SignalEnvelope } from '@/types/peer'
 import { peerManager } from '@/services/webrtc/peer-manager'
 import type { GatheringOutcome } from '@/services/webrtc/ice'
@@ -12,6 +12,7 @@ import type { ControlMessage } from '@/types/room'
 import { useGuestStore } from '@/stores/guestStore'
 import { useStudioStore } from '@/stores/studioStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import type { RoomPeerInfo } from '@/services/signaling/types'
 import { useGuests } from './useGuests'
 import { useSignaling } from './useSignaling'
 
@@ -67,17 +68,37 @@ export type UseWebRTCOptions = {
   label?: string
 }
 
+/**
+ * Somebody else in the room, as far as this peer can tell.
+ *
+ * `stream` is null between being announced by the relay and media actually
+ * arriving — a real state worth rendering ("connecting") rather than hiding,
+ * because it is also where a connection that never completes comes to rest.
+ */
+export type RemoteParticipant = {
+  peerId: string
+  label: string
+  role: 'director' | 'guest'
+  stream: MediaStream | null
+}
+
 export type UseWebRTC = {
   supported: boolean
   peers: PeerState[]
   /**
-   * The most recent inbound stream from a remote peer.
+   * Everyone else in the room, in join order.
    *
-   * A director sends its *program output* to guests, so for a push view this
-   * is the production feed — what the guest should be watching. Exposed as a
-   * plain stream because the guest view has no scene model to put it in.
+   * Includes the director when there is one; `programStream` picks it out.
    */
-  remoteStream: MediaStream | null
+  participants: RemoteParticipant[]
+  /**
+   * The director's program output, when a director is in the room.
+   *
+   * Separated from the other participants because it is categorically
+   * different: not a camera but the composed production, which is what a
+   * guest should be watching.
+   */
+  programStream: MediaStream | null
   /** Assessment of the last locally-gathered candidate set. */
   connectivity: ConnectivityAssessment | null
   busy: boolean
@@ -140,7 +161,17 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
 
   const [connectivity, setConnectivity] = useState<ConnectivityAssessment | null>(null)
   const [busy, setBusy] = useState(false)
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
+
+  /**
+   * The room roster, keyed by the relay's peer id.
+   *
+   * Held in state because labels and roles are rendered, and mirrored into a
+   * ref because the signaling callbacks need to read it synchronously — they
+   * fire outside React's update cycle and a render-time snapshot would be a
+   * message behind.
+   */
+  const [participantMap, setParticipantMap] = useState<Record<string, RemoteParticipant>>({})
+  const rosterRef = useRef(new Map<string, RoomPeerInfo>())
 
   /** peerId → guestId, so an incoming stream lands on the right guest. */
   const peerToGuest = useRef(new Map<string, string>())
@@ -179,17 +210,52 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   }, [])
 
   /**
-   * A peer announced by the room, pending an offer.
+   * A peer announced by the room. Decide whether to offer to it.
    *
-   * Only the **director** offers. If both sides offered on sight they would
-   * each create a connection and glare — two half-negotiated peers and no
-   * media. Giving one role the initiative avoids needing tie-breaking.
+   * WHO OFFERS
+   * ----------
+   * Exactly one side must, or both create a connection and glare — two
+   * half-negotiated peers and no media.
+   *
+   *  - **Director → guest.** The director has the initiative, because what it
+   *    sends is categorically different (the composed program) and it is the
+   *    one peer guaranteed to be in the room once.
+   *  - **Guest → guest.** Neither has standing, so the tie is broken on peer
+   *    id. Both sides run the same comparison and reach opposite conclusions,
+   *    so precisely one offers — no handshake, no retry, no race. Relay ids
+   *    are UUIDs, so a collision is not a case to handle.
+   *  - **Guest → director.** Never; the director will offer.
+   *
+   * This is a full mesh between guests, which is what lets a room work with no
+   * director in it at all. It is also why the guest count has a ceiling: every
+   * guest encodes its camera once per peer. See README › Known limitations.
    */
   const handlePeerAvailable = useCallback(
-    (peer: { peerId: string; role: 'director' | 'guest'; label: string }) => {
-      if (role !== 'director') return
+    (peer: RoomPeerInfo) => {
+      rosterRef.current.set(peer.peerId, peer)
+      setParticipantMap((current) => ({
+        ...current,
+        [peer.peerId]: {
+          peerId: peer.peerId,
+          label: peer.label,
+          role: peer.role,
+          // Preserve a stream that somehow arrived first.
+          stream: current[peer.peerId]?.stream ?? null,
+        },
+      }))
+
+      if (role === 'director') {
+        // Two directors in one room is a misconfiguration, not a topology.
+        if (peer.role === 'director') return
+        void offerToRef.current?.(peer.peerId, peer.label)
+        return
+      }
+
       if (peer.role === 'director') return
-      void offerToRef.current?.(peer.peerId, peer.label)
+
+      const me = localPeerIdRef.current()
+      if (!me) return
+      if (me > peer.peerId) void offerToRef.current?.(peer.peerId, peer.label)
     },
     [role],
   )
@@ -205,6 +271,13 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
    * one guest.
    */
   const handlePeerGone = useCallback((peerId: string) => {
+    rosterRef.current.delete(peerId)
+    setParticipantMap((current) => {
+      if (!current[peerId]) return current
+      const next = { ...current }
+      delete next[peerId]
+      return next
+    })
     void dropPeerRef.current?.(peerId)
   }, [])
 
@@ -238,6 +311,9 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
   const sendCandidateRef = useRef(signaling.sendCandidate)
   sendCandidateRef.current = signaling.sendCandidate
 
+  const localPeerIdRef = useRef(signaling.localPeerId)
+  localPeerIdRef.current = signaling.localPeerId
+
   const trickle = signaling.capabilities.supportsTrickleIce
 
   /**
@@ -266,13 +342,40 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
         onControlState: (controlState) => setControlState(controlState),
         onControlMessage: (_peerId, message) => onControlMessageRef.current?.(message),
         onRemoteStream: (peerId, stream) => {
-          setRemoteStream(stream)
+          const known = rosterRef.current.get(peerId)
+          setParticipantMap((current) => ({
+            ...current,
+            [peerId]: {
+              peerId,
+              // The roster is the only source of a peer's name and role: an
+              // SDP envelope does not carry the *sender's* identity, so a
+              // stream on its own cannot say who it belongs to.
+              label: known?.label ?? current[peerId]?.label ?? 'Guest',
+              role: known?.role ?? current[peerId]?.role ?? 'guest',
+              stream,
+            },
+          }))
+
+          /*
+           * Only a director turns an inbound stream into a *source*.
+           *
+           * A guest has no scenes, no mixer strip and no compositor to put one
+           * in; doing it anyway would build a production model nothing renders
+           * and add mixer channels whose audio is already playing through the
+           * participant's own video element.
+           */
+          if (role !== 'director') return
           const guestId = peerToGuest.current.get(peerId)
           if (!guestId) return
           attachStream(guestId, stream)
         },
         onRemoteStreamEnded: (peerId) => {
-          setRemoteStream(null)
+          setParticipantMap((current) => {
+            const existing = current[peerId]
+            if (!existing) return current
+            return { ...current, [peerId]: { ...existing, stream: null } }
+          })
+          if (role !== 'director') return
           const guestId = peerToGuest.current.get(peerId)
           if (guestId) detachStream(guestId)
         },
@@ -293,6 +396,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
     setPeerStats,
     showToast,
     trickle,
+    role,
   ])
 
   /**
@@ -381,9 +485,13 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
    */
   const offerToPeer = useCallback(
     async (remotePeerId: string, remoteLabel: string) => {
-      const guest = addPeerGuest(remoteLabel)
-      peerToGuest.current.set(remotePeerId, guest.id)
-      bindPeer(guest.id, remotePeerId)
+      // A guest row belongs to the control room's production model. A guest
+      // offering to another guest is a meeting participant, not a source.
+      if (role === 'director') {
+        const guest = addPeerGuest(remoteLabel)
+        peerToGuest.current.set(remotePeerId, guest.id)
+        bindPeer(guest.id, remotePeerId)
+      }
 
       const result = await peerManager.createOfferTo(remotePeerId)
       if (!result) {
@@ -391,7 +499,7 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
         return
       }
     },
-    [addPeerGuest, bindPeer, showToast],
+    [addPeerGuest, bindPeer, role, showToast],
   )
 
   const createOffer = useCallback(async (): Promise<SignalEnvelope | null> => {
@@ -418,20 +526,24 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
     async (envelope: SignalEnvelope): Promise<SignalEnvelope | null> => {
       setBusy(true)
       try {
-        const guest = addPeerGuest(envelope.label || 'Host')
         const result = await peerManager.acceptOffer(envelope)
         if (!result) {
           showToast('That offer could not be applied.', 'error')
           return null
         }
-        peerToGuest.current.set(result.peerId, guest.id)
-        bindPeer(guest.id, result.peerId)
+        // Same asymmetry as `offerToPeer`: only a control room keeps a guest
+        // row, because only a control room has a production to put it in.
+        if (role === 'director') {
+          const guest = addPeerGuest(envelope.label || 'Host')
+          peerToGuest.current.set(result.peerId, guest.id)
+          bindPeer(guest.id, result.peerId)
+        }
         return result.envelope
       } finally {
         setBusy(false)
       }
     },
-    [addPeerGuest, bindPeer, showToast],
+    [addPeerGuest, bindPeer, role, showToast],
   )
 
   // Publish the current implementations for the stable callbacks above.
@@ -543,10 +655,17 @@ export function useWebRTC(options?: UseWebRTCOptions): UseWebRTC {
     [],
   )
 
+  const participants = useMemo(() => Object.values(participantMap), [participantMap])
+  const programStream = useMemo(
+    () => participants.find((entry) => entry.role === 'director')?.stream ?? null,
+    [participants],
+  )
+
   return {
     supported: peerManager.isSupported(),
     peers: Object.values(peerStates),
-    remoteStream,
+    participants,
+    programStream,
     connectivity,
     busy,
     signaling,

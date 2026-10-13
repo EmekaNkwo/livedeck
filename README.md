@@ -67,6 +67,7 @@ Camera / Screen / Guest sources
 - [Solo links share one feed](#solo-links-share-one-feed)
 - [Invite links (Manual mode)](#invite-links-manual-mode)
 - [URL parameters](#url-parameters)
+- [A room does not need a director](#a-room-does-not-need-a-director)
 - [The guest view is a meeting, not a studio](#the-guest-view-is-a-meeting-not-a-studio)
 - [Director controls](#director-controls)
 - [Operation modes](#operation-modes)
@@ -336,6 +337,33 @@ documented without being implemented, or vice versa.
 browsers will not start an `AudioContext` without a user gesture — promising
 otherwise would just produce a silent guest.
 
+### A room does not need a director
+
+Guests in the same room connect to **each other**, so a room works as a plain
+call with no control room in it at all. One guest opens `/push/:room`, sends the
+link on with **Invite**, and the next one appears — no director, no scenes, no
+recorder.
+
+Who offers is decided by role, because exactly one side must or both create a
+connection and glare:
+
+| | Offers to | Why |
+| --- | --- | --- |
+| Director → guest | every guest | It has the initiative: what it sends is the composed program, and it is the one peer guaranteed to be in the room once |
+| Guest → guest | the peer with the lesser id | Neither has standing, so the tie breaks on peer id — both sides run the same comparison and reach opposite conclusions, so precisely one offers |
+| Guest → director | never | The director will offer |
+
+A guest's inbound streams are **not** turned into sources. A guest has no
+scenes, no mixer strip and no compositor to put one in, so building a
+production model nothing renders would only add mixer channels duplicating
+audio that is already playing through the participant's own video element. Only
+a control room does that.
+
+This is a **full mesh**, which is what makes it work without a server-side
+mixer — and also what caps the room size: every guest encodes its camera once
+per peer, so cost grows with the square of the room. See
+[Known limitations](#known-limitations).
+
 ### The guest view is a meeting, not a studio
 
 A **lobby** — set a name, check your camera, join — and then a **call**: the
@@ -345,10 +373,24 @@ toggles, the right half opens a device picker, because "turn my camera off" and
 "use my *other* camera" are different intentions and burying the second one in
 a settings page is how people join on the wrong device.
 
-The stage deliberately shows the **composed program** rather than a participant
-grid. The director sends its program output, so a guest sees exactly what is
-going to air, including how they are framed. A grid would be a second, parallel
-answer to "what is happening", and the wrong one to trust.
+What the stage shows depends on whether a director is in the room:
+
+- **With a director**, the stage is the **composed program** and the other
+  guests sit in a strip beneath it. The program is what is going to air,
+  including this guest framed the way the director framed them, so it gets the
+  space — a participant grid would be a second, parallel answer to "what is
+  happening", and the wrong one to trust. The strip is fixed-height and scrolls
+  horizontally, so a growing room never eats into the program.
+- **With no director**, the room is just a call, so the participants *are* the
+  stage: a grid that follows the room rather than a column count chosen in
+  advance (`auto-fit` with a minimum tile width), so one other person gets the
+  whole width and five share it.
+
+Both the stage and the tiles are sized to their container, not to the video.
+`max-width`/`max-height` caps an element at its *intrinsic* size, so a 720p
+program sat at 1280×720 in the middle of a wider stage and refused to grow;
+sizing to the container and letting `object-contain` letterbox fills the space
+given without ever distorting the aspect.
 
 ### Levels in the lobby, speaking indicators in the call
 
@@ -1164,8 +1206,8 @@ similarly for frame rate. The studio does not promise quality it cannot deliver.
 
 ## Testing strategy
 
-468 unit and integration tests (Vitest + React Testing Library) plus 39
-Playwright browser tests across seven scenarios.
+468 unit and integration tests (Vitest + React Testing Library) plus 42
+Playwright browser tests across eight scenarios.
 
 ```bash
 npm test                 # unit + integration
@@ -1226,7 +1268,7 @@ is the production one. The browser tests assert on real pipeline state — canva
 backing-store dimensions, sampled canvas pixels, track `readyState`, registered
 stream counts, compositor frame counts — not just on rendered labels.
 
-The seven scenarios: **A** local studio (devices → sources → scene → arrange →
+The eight scenarios: **A** local studio (devices → sources → scene → arrange →
 switch → record → preview → download, including that the blob is decodable by
 the browser's own player and the filename extension matches the real MIME type);
 **B** source composition (camera over screen share, transforms, layer order,
@@ -1240,7 +1282,10 @@ not duplicate them; **F** the scene window, which asserts that the mirrored
 program really decodes *moving* frames rather than showing a single stuck
 image; **G** device pickers, the speaking indicator, and solo sharing —
 including that a copied solo link really decodes the feed it names in a
-*different* window.
+*different* window; **H** the guest-to-guest mesh — two guests sent nothing but
+a room link decode each other's video with no control room involved, a third
+joining an existing pair sees both, and the director's program really fills the
+stage rather than sitting at its own resolution in the middle of it.
 
 Scenario D is worth describing in full, because it exercises the parts that are
 easiest to fake. It asserts that the generated link's **fragment really contains
@@ -1296,47 +1341,53 @@ Collected honestly in one place.
    picker. The app cannot enumerate or pre-select a target, and can only read
    what was picked when the browser reports `displaySurface` (Chrome does;
    others do not).
-4. **Display audio is not guaranteed.** `audio: true` is a request. Whether a
+4. **Room size is capped by the mesh.** Every participant sends its camera to
+   every other one, so encode cost and uplink grow with the square of the room.
+   The relay refuses a 13th peer, but the practical ceiling is lower and
+   depends on the weakest machine in the room — a handful of guests, not a
+   dozen. Going further needs a server-side mixer (an SFU), which is a
+   different architecture and not what this is.
+5. **Display audio is not guaranteed.** `audio: true` is a request. Whether a
    track arrives depends on the OS, browser and chosen surface — Chrome on
    Windows can share tab and system audio, macOS generally cannot share a whole
    screen's audio, Firefox and Safari largely do not offer it. The app inspects
    the actual tracks and explains when none arrived.
-5. **A recording in progress is lost if the page is closed.** The browser will
+6. **A recording in progress is lost if the page is closed.** The browser will
    not allow finalization during `beforeunload`.
-6. **Output quality cannot exceed the sources.** 1080p60 from a 720p30 camera
+7. **Output quality cannot exceed the sources.** 1080p60 from a 720p30 camera
    upscales and repeats frames; the settings dialog says so.
-7. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
+8. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
    missing. The control is disabled with an explanation.
-8. **Large recordings may exceed the storage quota.** They stay downloadable for
+9. **Large recordings may exceed the storage quota.** They stay downloadable for
    the session and are marked "Not stored".
-9. **Precise drag editing is impractical on small screens.** The mobile layout
+10. **Precise drag editing is impractical on small screens.** The mobile layout
    keeps the preview and recording status visible and points to the numeric
    controls, rather than pretending touch dragging on a 360px-wide canvas is
    equivalent.
-10. **Local image and video files are capped at 40MB** and held in memory for
+11. **Local image and video files are capped at 40MB** and held in memory for
     the session, since they are read as data URLs.
-11. **Invite links are long** — a few kilobytes even compressed, because they
+12. **Invite links are long** — a few kilobytes even compressed, because they
     contain a full SDP. They paste fine into chat and email, but they are not
     pretty, and some SMS clients will break them across lines.
-12. **A scene window mirrors the control room, so it depends on it.** The
+13. **A scene window mirrors the control room, so it depends on it.** The
     program is sent to it over a loopback peer connection, because a
     `MediaStream` cannot cross a browsing context — so closing the control room
     stops the mirror, and the scene window says so rather than freezing on the
     last frame. With no control room open it falls back to its own compositor,
     which can draw the saved scene layout but none of the live sources. It is
     not an independent process.
-13. **Remote control needs an open data channel.** Before a peer connects only
+14. **Remote control needs an open data channel.** Before a peer connects only
     the local controls apply — the UI disables the remote ones rather than
     pretending.
-14. **The signaling server is not serverless-deployable.** It holds WebSocket
+15. **The signaling server is not serverless-deployable.** It holds WebSocket
     connections and room state in one process's memory, so it needs a
     persistent host — not Vercel functions — and it does not scale past a single
     instance without shared state. Limits are 12 peers per room and 500 rooms.
-15. **A room name is not access control, in either transport.** With the relay
+16. **A room name is not access control, in either transport.** With the relay
     running, anyone who can reach it and guesses the name joins the room. There
     is no authentication anywhere in this project, and adding real accounts
     would mean a backend that owns identity.
-16. **Room joining requires the relay to be running.** It is the default
+17. **Room joining requires the relay to be running.** It is the default
     transport, so a fresh install with nothing on port 3001 reports "Could not
     reach the signaling server" and no guest can join until it is up or
     Signaling is switched to Manual. The studio cannot fall back silently:
@@ -1407,7 +1458,7 @@ camera. On Windows, check the privacy indicator in the taskbar.
 **Camera status is Idle after a reload** — Expected. Streams cannot be
 persisted, so capture is re-acquired explicitly. Scenes and layouts came back.
 
-**No display audio when sharing** — Platform-dependent; see limitation 4. Try
+**No display audio when sharing** — Platform-dependent; see limitation 5. Try
 sharing a **browser tab** rather than a whole screen, which is the surface most
 likely to offer audio.
 
@@ -1513,7 +1564,7 @@ src/
 ├── utils/                geometry, snapping, audio math, formatting, errors, ids
 ├── lib/                  capability detection, class-name helper
 └── test/                 browser API stubs for the unit suite
-e2e/                      Playwright scenarios A–G
+e2e/                      Playwright scenarios A–H
 shared/                   the signaling wire protocol — the only code compiled by
                           both the browser client and the server
 server/                   signaling relay (Next.js + ws). Required for guests to

@@ -60,6 +60,14 @@ export type UseSignaling = {
   joinRoom: (options: JoinRoomOptions) => Promise<void>
   /** Leave the current room, keeping the transport. A no-op without rooms. */
   leaveRoom: () => Promise<void>
+  /**
+   * This peer's id as assigned by the relay, or null before joining.
+   *
+   * Needed to break glare between two peers of equal standing: when neither
+   * has the initiative by role, comparing ids gives both sides the same answer
+   * about which one offers.
+   */
+  localPeerId: () => string | null
   /** Relay a trickled candidate. A no-op when the transport cannot trickle. */
   sendCandidate: (peerId: string, candidate: RTCIceCandidateInit) => void
   /** Validate a pasted code without applying it. */
@@ -195,6 +203,8 @@ export function useSignaling(events?: {
     await adapterRef.current?.leaveRoom?.()
   }, [])
 
+  const localPeerId = useCallback(() => adapterRef.current?.localPeerId?.() ?? null, [])
+
   const sendCandidate = useCallback((peerId: string, candidate: RTCIceCandidateInit) => {
     adapterRef.current?.sendCandidate?.(peerId, candidate)
   }, [])
@@ -209,6 +219,7 @@ export function useSignaling(events?: {
     transportState,
     joinRoom,
     leaveRoom,
+    localPeerId,
     sendCandidate,
     publish,
     clearPublished,

@@ -34,6 +34,7 @@ import { DeviceButton } from '@/components/shared/DeviceButton'
 import { TextField } from '@/components/shared/Field'
 import { Notice, StatusDot } from '@/components/shared/Status'
 import { LevelMeter } from '@/components/audio/LevelMeter'
+import { ParticipantTile } from '@/components/guests/ParticipantTile'
 import { useIsSpeaking } from '@/hooks/useIsSpeaking'
 import { SpeakingIndicator } from '@/components/audio/SpeakingIndicator'
 
@@ -49,13 +50,18 @@ import { SpeakingIndicator } from '@/components/audio/SpeakingIndicator'
  * is a sender, and anything else here is something for a nervous guest to get
  * wrong.
  *
- * THE MAIN STAGE IS THE PROGRAM, NOT A GRID
- * -----------------------------------------
- * A meeting shows you every participant; this deliberately shows the composed
- * production instead. The director sends its program output, so what a guest
- * watches is exactly what is going to air — including themselves, framed the
- * way the director framed them. A participant grid would be a second, parallel
- * answer to "what is happening", and the wrong one to trust.
+ * THE STAGE DEPENDS ON WHETHER A DIRECTOR IS IN THE ROOM
+ * ------------------------------------------------------
+ * With a director, the stage is the **composed program** and the other guests
+ * are a strip beneath it. The program is what is going to air, including this
+ * guest framed the way the director framed them, so it is the thing to give
+ * the space to — a participant grid would be a second, parallel answer to
+ * "what is happening", and the wrong one to trust.
+ *
+ * With no director the room is just a call, so the stage *is* the participant
+ * grid. A room full of guests and no control room is a supported
+ * configuration: guests connect to each other in a full mesh, so one can be
+ * created and used with nobody producing it.
  *
  * TWO WAYS IN, AND THE PAGE KNOWS WHICH IT IS
  * -------------------------------------------
@@ -113,6 +119,7 @@ export function PushPage() {
   const [joining, setJoining] = useState(false)
   const [answerUrl, setAnswerUrl] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [roomLinkCopied, setRoomLinkCopied] = useState(false)
   const selfViewRef = useRef<HTMLVideoElement | null>(null)
   const stageRef = useRef<HTMLVideoElement | null>(null)
 
@@ -191,6 +198,24 @@ export function PushPage() {
     } finally {
       setJoining(false)
     }
+  }
+
+  /**
+   * Copy the room link, so a guest can invite the next one.
+   *
+   * A room does not need a director, so the guest view needs its own way to
+   * grow the room — otherwise the only path to a second participant runs
+   * through a control room that may never open.
+   */
+  const copyRoomLink = async () => {
+    const url = `${window.location.origin}/push/${encodeURIComponent(room)}`
+    const ok = await invite.copy(url)
+    if (ok) {
+      setRoomLinkCopied(true)
+      window.setTimeout(() => setRoomLinkCopied(false), 2000)
+      return
+    }
+    showToast(`Room link: ${url}`, 'info')
   }
 
   /** Leave: drop the peer connections and return to the lobby. */
@@ -273,7 +298,7 @@ export function PushPage() {
   useEffect(() => {
     const element = stageRef.current
     if (!element) return
-    const stream = webrtc.remoteStream
+    const stream = webrtc.programStream
     if (element.srcObject !== stream) element.srcObject = stream
     if (stream) {
       void element.play().catch(() => {
@@ -285,7 +310,7 @@ export function PushPage() {
     return () => {
       element.srcObject = null
     }
-  }, [webrtc.remoteStream])
+  }, [webrtc.programStream])
 
   useEffect(() => {
     if (parameters.unknown.length === 0) return
@@ -320,6 +345,15 @@ export function PushPage() {
   if (!rawRoom || !room) return <Navigate to="/" replace />
 
   const connected = peer?.status === 'connected'
+  /*
+   * Everyone except the director.
+   *
+   * The director's feed is the stage when there is one, so including it in the
+   * participant list would show the program twice.
+   */
+  const participantsWithoutDirector = webrtc.participants.filter(
+    (participant) => participant.role !== 'director',
+  )
   const mirroredSelf = parameters.mirror || camera.mirrored
   const inLobby = roomsSupported && !joinedAs
   const permissionDenied = camera.status === 'denied' || microphone.status === 'denied'
@@ -495,7 +529,8 @@ export function PushPage() {
               <h1 className="text-base font-semibold text-ink-100">Ready to join?</h1>
               <p className="text-xs leading-relaxed text-ink-400">
                 Room <strong className="text-ink-200">{room}</strong>. Check your camera first —
-                nothing reaches the director until you join.
+                nothing is sent anywhere until you join. A director does not have to be here:
+                guests in the same room see each other.
               </p>
             </div>
 
@@ -547,6 +582,17 @@ export function PushPage() {
               </p>
             )}
 
+            {roomsSupported ? (
+              <Button variant="outline" size="sm" onClick={() => void copyRoomLink()}>
+                {roomLinkCopied ? (
+                  <Check aria-hidden="true" className="h-3.5 w-3.5" />
+                ) : (
+                  <ClipboardCopy aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+                {roomLinkCopied ? 'Copied' : 'Copy room link'}
+              </Button>
+            ) : null}
+
             {permissionDenied ? <PermissionHelp camera={camera} microphone={microphone} /> : null}
           </div>
         </div>
@@ -572,31 +618,80 @@ export function PushPage() {
           ) : null}
 
           {/* ------------------------------------------------------- stage */}
-          <div className="relative flex min-h-0 flex-1 items-center justify-center bg-black p-2">
-            {webrtc.remoteStream ? (
+          <div className="relative flex min-h-0 flex-1 flex-col gap-2 bg-black p-2">
+            {webrtc.programStream ? (
+              /*
+               * `h-full w-full`, not `max-h-full max-w-full`.
+               *
+               * A max-* pair caps the element at its *intrinsic* size, so a
+               * 720p program sat at 1280×720 in the middle of a larger stage
+               * and refused to grow. Sizing to the container and letting
+               * `object-contain` letterbox fills the space given while still
+               * never distorting the aspect.
+               */
               <video
                 ref={stageRef}
                 autoPlay
                 playsInline
                 aria-label="The director's program feed"
-                className="max-h-full max-w-full object-contain"
+                className="min-h-0 w-full flex-1 bg-black object-contain"
               />
+            ) : participantsWithoutDirector.length > 0 ? (
+              /*
+               * No director: the room is a call, so the participants *are* the
+               * stage. `auto-fit` rather than a fixed column count, so one
+               * other person gets the whole width and five share it — the
+               * grid follows the room instead of the room being squeezed into
+               * a layout chosen in advance.
+               */
+              <div className="grid min-h-0 w-full flex-1 content-center gap-2 overflow-y-auto [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+                {participantsWithoutDirector.map((participant) => (
+                  <ParticipantTile key={participant.peerId} participant={participant} />
+                ))}
+              </div>
             ) : (
-              <div className="flex flex-col items-center gap-2 text-center text-ink-500">
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-center text-ink-500">
                 <Radio aria-hidden="true" className="h-8 w-8" />
                 <p className="text-sm text-ink-300">
-                  {connected
-                    ? 'Connected. Waiting for the director’s program feed.'
-                    : peer?.status === 'failed'
-                      ? 'The connection failed.'
-                      : 'Waiting for the director to connect you.'}
+                  {peer?.status === 'failed'
+                    ? 'The connection failed.'
+                    : 'You are the only one here.'}
                 </p>
                 <p className="max-w-sm text-[11px] leading-relaxed text-ink-500">
-                  When the production is live this shows the composed program — what is actually
-                  going to air, including you.
+                  Send the room link to whoever should join. If a director opens this room, their
+                  composed program takes over this space.
                 </p>
+                {roomsSupported ? (
+                  <Button variant="outline" size="sm" onClick={() => void copyRoomLink()}>
+                    {roomLinkCopied ? (
+                      <Check aria-hidden="true" className="h-3.5 w-3.5" />
+                    ) : (
+                      <ClipboardCopy aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                    {roomLinkCopied ? 'Copied' : 'Copy room link'}
+                  </Button>
+                ) : null}
               </div>
             )}
+
+            {/*
+              With a director on the stage, the other guests go in a strip.
+
+              Fixed height and horizontally scrollable: the program is the
+              thing being watched, so a growing number of participants must not
+              eat into it.
+            */}
+            {webrtc.programStream && participantsWithoutDirector.length > 0 ? (
+              <div className="flex shrink-0 gap-2 overflow-x-auto pb-1">
+                {participantsWithoutDirector.map((participant) => (
+                  <ParticipantTile
+                    key={participant.peerId}
+                    participant={participant}
+                    className="h-24 w-40 shrink-0 sm:h-28 sm:w-48"
+                  />
+                ))}
+              </div>
+            ) : null}
 
             {/*
               Self-view, floating over the stage the way a meeting does.
@@ -628,10 +723,20 @@ export function PushPage() {
               {mediaControls}
 
               {roomsSupported ? (
-                <Button variant="live" size="sm" onClick={leave}>
-                  <LogOut aria-hidden="true" className="h-3.5 w-3.5" />
-                  Leave
-                </Button>
+                <>
+                  <Button variant="outline" size="sm" onClick={() => void copyRoomLink()}>
+                    {roomLinkCopied ? (
+                      <Check aria-hidden="true" className="h-3.5 w-3.5" />
+                    ) : (
+                      <ClipboardCopy aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                    {roomLinkCopied ? 'Copied' : 'Invite'}
+                  </Button>
+                  <Button variant="live" size="sm" onClick={leave}>
+                    <LogOut aria-hidden="true" className="h-3.5 w-3.5" />
+                    Leave
+                  </Button>
+                </>
               ) : null}
             </div>
 
