@@ -1431,6 +1431,17 @@ Settings › ICE servers as `turn:host:port|username:password`, or set
 `VITE_TURN_URLS`. **Switching to the signaling server does not fix this** —
 media is peer-to-peer either way. See limitation 1.
 
+**"Could not reach the signaling server", but the relay is up** — Most likely
+`ALLOWED_ORIGINS` does not contain the studio's origin, and the socket is being
+refused with a 403. You cannot see that from the browser: it hides the HTTP
+status of a failed WebSocket handshake, so the console says only *"WebSocket
+connection failed"*. Check the relay's startup log, which prints the effective
+allow-list, and compare it with the studio's origin exactly — `scheme://host`,
+no trailing slash, and `https` not `http` if the studio is served over TLS. A
+`curl` probe is not a valid test here: a client that sends no `Origin` header at
+all is allowed through by design, so curl passes while every browser is
+refused.
+
 **"Could not reach the signaling server"** — The relay is not running, or
 something else is on its port. Start it with `npm --prefix server run dev` and
 check `http://localhost:3001/healthz` returns JSON. If that returns an HTML page

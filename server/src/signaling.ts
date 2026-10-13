@@ -25,6 +25,19 @@ import { RoomRegistry, type PeerHandle, type RoomLimits } from './rooms'
  * VPS. See the README.
  */
 
+/**
+ * Reduce an origin to the form a browser actually sends.
+ *
+ * Trims surrounding whitespace (a comma-separated environment variable
+ * invariably grows some), drops any trailing slashes, and lower-cases what is
+ * left. Returns '' for input that is not an origin at all, so the caller can
+ * drop it rather than adding an entry nothing can ever match.
+ */
+export function normalizeOrigin(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, '')
+  return trimmed.toLowerCase()
+}
+
 export type SignalingOptions = {
   path?: string
   limits?: Partial<RoomLimits>
@@ -68,14 +81,33 @@ export function attachSignaling(
   const wss = new WebSocketServer({ noServer: true })
   const connections = new Set<Connection>()
 
+  /*
+   * The allow-list, normalized once at attach time.
+   *
+   * An `Origin` header is only ever `scheme://host[:port]` — no path, and so
+   * never a trailing slash. An operator copying the studio's address out of a
+   * browser address bar gets `https://studio.example.com/` *with* one, and an
+   * exact match then rejects every real browser while a hand-rolled `curl`
+   * test with the same trailing slash passes. That failure is close to
+   * undiagnosable from the client, because browsers deliberately hide the HTTP
+   * status of a failed WebSocket handshake: the console says only
+   * "WebSocket connection failed".
+   *
+   * So both sides are normalized instead. Lower-casing is safe for the same
+   * reason — scheme and host are case-insensitive and there is no path to
+   * preserve the case of.
+   */
+  const allowedOrigins = (options.allowedOrigins ?? [])
+    .map(normalizeOrigin)
+    .filter(Boolean)
+
   const originAllowed = (request: IncomingMessage): boolean => {
-    const allowed = options.allowedOrigins ?? []
-    if (allowed.length === 0) return true
+    if (allowedOrigins.length === 0) return true
     const origin = request.headers.origin
     // A missing Origin means a non-browser client; allow it, since the browser
     // security model is what Origin exists to express.
     if (!origin) return true
-    return allowed.includes(origin)
+    return allowedOrigins.includes(normalizeOrigin(origin))
   }
 
   /*

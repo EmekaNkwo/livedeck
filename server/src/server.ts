@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import next from 'next'
-import { attachSignaling } from './signaling'
+import { attachSignaling, normalizeOrigin } from './signaling'
 
 /**
  * The signaling host: Next.js plus a WebSocket relay in one Node process.
@@ -111,6 +111,21 @@ async function main(): Promise<void> {
       console.warn(
         '[livedeck-signaling] ALLOWED_ORIGINS is unset: any origin may connect. ' +
           'Set it before exposing this publicly.',
+      )
+    } else {
+      /*
+       * Log the *normalized* list, not the raw variable.
+       *
+       * A browser that is refused shows only "WebSocket connection failed" —
+       * it hides the handshake's HTTP status by design — so the allow-list is
+       * effectively invisible from the client when it is wrong. Printing what
+       * the server will actually compare against turns that into a one-glance
+       * check, and shows up the common mistakes: a trailing slash copied from
+       * an address bar, `http` where the studio is served over `https`, or the
+       * relay's own address instead of the studio's.
+       */
+      console.log(
+        `[livedeck-signaling] allowed origins: ${allowedOrigins.map(normalizeOrigin).join(', ')}`,
       )
     }
   })

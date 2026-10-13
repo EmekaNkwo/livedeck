@@ -446,3 +446,73 @@ describe('upgrade handling', () => {
     ).rejects.toThrow()
   })
 })
+
+/**
+ * How an allow-list entry is written versus what a browser sends.
+ *
+ * The regression these exist for cost a deployment: `ALLOWED_ORIGINS` was set
+ * from a copied address bar, so it carried a trailing slash. An `Origin`
+ * header is only `scheme://host[:port]` and never has one, so an exact match
+ * refused every real browser — while a `curl` check using the same trailing
+ * slash passed, pointing the diagnosis in precisely the wrong direction.
+ *
+ * It was close to invisible from the client, too: browsers hide the HTTP
+ * status of a failed WebSocket handshake, so the console said only
+ * "WebSocket connection failed" with no 403 to go on.
+ */
+describe('origin allow-list normalization', () => {
+  const connects = async (origin: string): Promise<boolean> => {
+    const socket = new WebSocket(url(), { origin })
+    const opened = await new Promise<boolean>((resolve) => {
+      socket.once('open', () => resolve(true))
+      socket.once('error', () => resolve(false))
+    })
+    socket.terminate()
+    return opened
+  }
+
+  const withAllowList = async (allowedOrigins: string[]) => {
+    await signaling.close()
+    signaling = attachSignaling(httpServer, {
+      path: '/signal',
+      allowedOrigins,
+      log: () => {},
+    })
+  }
+
+  it('accepts a browser origin when the entry has a trailing slash', async () => {
+    await withAllowList(['https://studio.example/'])
+    expect(await connects('https://studio.example')).toBe(true)
+  })
+
+  it('accepts a browser origin when the entry has stray whitespace', async () => {
+    // What splitting `A, B` on a comma leaves behind.
+    await withAllowList([' https://studio.example '])
+    expect(await connects('https://studio.example')).toBe(true)
+  })
+
+  it('ignores case, since scheme and host are case-insensitive', async () => {
+    await withAllowList(['https://Studio.Example'])
+    expect(await connects('https://studio.example')).toBe(true)
+  })
+
+  it('still refuses an origin that is genuinely not on the list', async () => {
+    // Normalizing must not become "allow anything that looks similar".
+    await withAllowList(['https://studio.example/'])
+    expect(await connects('https://studio.example.evil.test')).toBe(false)
+    expect(await connects('http://studio.example')).toBe(false)
+  })
+
+  it('refuses everything but a missing Origin once a list is configured', async () => {
+    await withAllowList(['https://studio.example'])
+    // A non-browser client sends no Origin at all and is allowed through, which
+    // is what makes a curl probe pass while every browser is refused.
+    const socket = new WebSocket(url())
+    const opened = await new Promise<boolean>((resolve) => {
+      socket.once('open', () => resolve(true))
+      socket.once('error', () => resolve(false))
+    })
+    socket.terminate()
+    expect(opened).toBe(true)
+  })
+})
