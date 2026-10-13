@@ -16,6 +16,14 @@ services:
     dockerfilePath: ./server/Dockerfile
     # The repository root. See the note above and the header of the Dockerfile.
     dockerContext: .
+    #
+    # `rootDir` is deliberately NOT set. It re-roots every other path, so
+    # pointing it at `server/` — the intuitive thing for a service that lives
+    # there — makes the two paths above resolve inside `server/server/` and
+    # leaves `shared/` outside the build context, which fails the build on
+    # three COPY steps with `"/shared": not found`. If you configure this
+    # service by hand instead of from this blueprint, leave Root Directory
+    # blank.
     plan: starter
     region: oregon
 

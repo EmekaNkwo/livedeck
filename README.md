@@ -1029,11 +1029,20 @@ On Render, as a **Docker** web service — or just apply the blueprint:
 
 | Setting | Value |
 | --- | --- |
+| **Root Directory** | **blank** |
 | Dockerfile Path | `./server/Dockerfile` |
 | Docker Build Context Directory | `.` |
 | Health Check Path | `/healthz` |
 | `ALLOWED_ORIGINS` | wherever the studio is served from |
 | Instances | 1 — see below |
+
+**Leave Root Directory empty.** It re-roots every other path, so setting it to
+`server` — the intuitive thing to do for a service that lives in `server/` —
+makes the two paths below it resolve inside `server/server/`, and puts `shared/`
+outside the context altogether. The build then fails on three `COPY` steps with
+`"/shared": not found`, and the context loads as `2B` because BuildKit only
+fetches paths a `COPY` actually references. The blueprint avoids this by not
+setting `rootDir` at all.
 
 Then point the studio at it: **Settings → Signaling → Server address**,
 `wss://your-service.onrender.com`. Or set `VITE_SIGNALING_URL` at build time so
