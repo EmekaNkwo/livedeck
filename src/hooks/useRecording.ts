@@ -5,16 +5,15 @@ import { audioMixer } from '@/services/audio/audio-mixer'
 import { recordingEngine } from '@/services/recording/recording-engine'
 import type { RecordingResult } from '@/services/recording/recording-engine'
 import { listSupportedFormats, selectRecordingFormat } from '@/services/recording/mime'
-import { patchWebmDuration } from '@/services/recording/webm-duration'
+import { finalizeRecording } from '@/services/recording/finalize'
 import {
   appendChunk,
   beginRecording,
   deleteRecording,
   estimateStorage,
   finishRecording,
-  loadChunk,
-  loadRecordingBlob,
   requestPersistentStorage,
+  setRecordingFormat,
 } from '@/services/persistence/recording-store'
 import { createRecordingId } from '@/utils/id'
 import { formatTimestamp } from '@/utils/format'
@@ -37,8 +36,9 @@ import { useSettingsStore } from '@/stores/settingsStore'
  * chunk has landed. The browser never holds the recording in memory, and an
  * interrupted recording is recovered from its chunks on the next load.
  *
- * On completion the WebM header is patched with the real duration, so the
- * file reports its length and seeks instead of showing `Infinity`.
+ * On Stop the stored file is rewritten, without re-encoding, into a
+ * standard MP4 or an indexed WebM, so it reports its length, seeks, and
+ * opens in editors. The status stays `finalizing` until that is done.
  */
 
 /** Refuse to start with less headroom than this. */
@@ -96,32 +96,24 @@ export function useRecording(): UseRecording {
       compositor.lockSize(false)
       if (!active) return
 
-      let durationMs = result.durationMs
-      let size = result.bytes
       try {
-        // Patch the duration into the stored header so the file reports its
-        // length. The patched header replaces chunk 0; the body is untouched.
-        const whole = await loadRecordingBlob(active.id)
-        if (whole && result.mimeType.includes('webm')) {
-          const patched = await patchWebmDuration(whole, durationMs)
-          if (patched.patched) {
-            // Only the leading bytes changed; rewrite chunk 0 with the new
-            // header plus whatever of the original chunk 0 followed it.
-            const headerLength = patched.blob.size - whole.size + (await firstChunkSize(active.id))
-            await appendChunk(active.id, 0, patched.blob.slice(0, headerLength), Date.now())
-            size = patched.blob.size
-          }
-        }
-        await finishRecording(active.id, {
-          durationMs,
-          size,
+        const final = await finalizeRecording({
+          id: active.id,
           mimeType: result.mimeType,
-          extension: result.extension,
+          durationMs: result.durationMs,
+          bytes: result.bytes,
         })
-        addEntry({ ...active, durationMs, size, mimeType: result.mimeType, extension: result.extension, persisted: true })
+        const patch = {
+          durationMs: final.durationMs,
+          size: final.size,
+          mimeType: final.mimeType,
+          extension: final.extension,
+        }
+        await finishRecording(active.id, patch)
+        addEntry({ ...active, ...patch, persisted: true })
         showToast('Recording saved to this device.', 'success')
+        if (final.warning) showToast(final.warning, 'info')
       } catch (persistError) {
-        durationMs = result.durationMs
         setError({
           code: 'persist-failed',
           message:
@@ -139,7 +131,9 @@ export function useRecording(): UseRecording {
 
   useEffect(() => {
     recordingEngine.setEvents({
-      onStatusChange: setStatus,
+      // The engine reports `complete` once capture ends; the file is not done
+      // until it has been rewritten, so this hook announces completion.
+      onStatusChange: (next) => setStatus(next === 'complete' ? 'finalizing' : next),
       onTick: setElapsed,
       onError: (recordingError) => {
         compositor.lockSize(false)
@@ -229,7 +223,13 @@ export function useRecording(): UseRecording {
 
     if (started) {
       setElapsed(0)
-      setFormat(recordingEngine.getFormat())
+      const chosen = recordingEngine.getFormat()
+      setFormat(chosen)
+      if (chosen) {
+        activeRef.current = { ...entry, mimeType: chosen.mimeType, extension: chosen.extension }
+        // Recovery reads this if the page goes away mid-recording.
+        void setRecordingFormat(id, chosen.mimeType, chosen.extension).catch(() => undefined)
+      }
     } else {
       compositor.lockSize(false)
       activeRef.current = null
@@ -290,9 +290,4 @@ export function useRecording(): UseRecording {
     cancel,
     dismissError: () => setError(null),
   }
-}
-
-async function firstChunkSize(recordingId: string): Promise<number> {
-  const chunk = await loadChunk(recordingId, 0)
-  return chunk?.size ?? 0
 }

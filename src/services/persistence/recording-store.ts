@@ -147,6 +147,11 @@ export async function appendChunk(recordingId: string, index: number, blob: Blob
   )
 }
 
+/** Record the format capture actually chose, once it has started. */
+export async function setRecordingFormat(recordingId: string, mimeType: string, extension: string): Promise<void> {
+  await guard(() => db().recordings.update(recordingId, { mimeType, extension, updatedAt: Date.now() }))
+}
+
 /** Mark a recording finished, with its final metadata. */
 export async function finishRecording(
   recordingId: string,
@@ -154,6 +159,40 @@ export async function finishRecording(
 ): Promise<void> {
   await guard(() =>
     db().recordings.update(recordingId, { ...patch, status: 'complete', persisted: true, updatedAt: Date.now() }),
+  )
+}
+
+/**
+ * Write one chunk of a scratch file: chunks that belong to no library row,
+ * used while a recording is rewritten into its final container.
+ */
+export async function putScratchChunk(scratchId: string, index: number, blob: Blob): Promise<void> {
+  await guard(() =>
+    db().chunks.put({ key: `${scratchId}:${pad(index)}`, recordingId: scratchId, index, bytes: blob.size, at: Date.now(), blob }),
+  )
+}
+
+/** Drop every chunk filed under `id` without touching any library row. */
+export async function deleteChunks(id: string): Promise<void> {
+  await guard(() => db().chunks.where('recordingId').equals(id).delete())
+}
+
+/**
+ * Make the scratch file the recording's contents, in one transaction: either
+ * the recording keeps its original chunks or it has the rewritten ones, never
+ * a mix of both.
+ */
+export async function replaceChunks(recordingId: string, scratchId: string): Promise<void> {
+  await guard(() =>
+    db().transaction('rw', db().chunks, async () => {
+      const scratch = await db().chunks.where('recordingId').equals(scratchId).toArray()
+      if (scratch.length === 0) throw new Error('The rewritten recording is empty.')
+      await db().chunks.where('recordingId').equals(recordingId).delete()
+      await db().chunks.bulkPut(
+        scratch.map((chunk) => ({ ...chunk, key: `${recordingId}:${pad(chunk.index)}`, recordingId })),
+      )
+      await db().chunks.where('recordingId').equals(scratchId).delete()
+    }),
   )
 }
 

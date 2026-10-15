@@ -91,11 +91,11 @@ class FakeMediaStream implements Partial<MediaStream> {
   getTracks(): MediaStreamTrack[] {
     return this.tracks as unknown as MediaStreamTrack[]
   }
-  getVideoTracks(): MediaStreamTrack[] {
-    return this.tracks.filter((t) => t.kind === 'video') as unknown as MediaStreamTrack[]
+  getVideoTracks(): MediaStreamVideoTrack[] {
+    return this.tracks.filter((t) => t.kind === 'video') as unknown as MediaStreamVideoTrack[]
   }
-  getAudioTracks(): MediaStreamTrack[] {
-    return this.tracks.filter((t) => t.kind === 'audio') as unknown as MediaStreamTrack[]
+  getAudioTracks(): MediaStreamAudioTrack[] {
+    return this.tracks.filter((t) => t.kind === 'audio') as unknown as MediaStreamAudioTrack[]
   }
   addTrack(track: MediaStreamTrack): void {
     this.tracks.push(track as unknown as FakeMediaStreamTrack)

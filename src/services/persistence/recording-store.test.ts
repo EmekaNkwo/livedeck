@@ -13,6 +13,7 @@ import {
   appendChunk,
   beginRecording,
   deleteAllRecordings,
+  deleteChunks,
   deleteRecording,
   describeChunks,
   finishRecording,
@@ -21,7 +22,10 @@ import {
   loadChunk,
   loadRecordingBlob,
   markInterrupted,
+  putScratchChunk,
+  replaceChunks,
   resetRecordingStore,
+  setRecordingFormat,
 } from './recording-store'
 
 const entry = (id: string): RecordingEntry => ({
@@ -109,5 +113,46 @@ describe('chunked recording store', () => {
     vi.spyOn(store, 'appendChunk').mockRejectedValueOnce(new QuotaExceededError('full'))
     await expect(store.appendChunk('r1', 0, new Blob(['x']), 1)).rejects.toBeInstanceOf(QuotaExceededError)
     void quotaError
+  })
+})
+
+describe('rewriting a recording through a scratch file', () => {
+  it('swaps the scratch chunks in as the recording, and leaves no scratch behind', async () => {
+    await beginRecording(entry('r1'), 1000)
+    await appendChunk('r1', 0, new Blob(['cap']), 1001)
+    await appendChunk('r1', 1, new Blob(['tured']), 1002)
+    await appendChunk('r1', 2, new Blob(['!']), 1003)
+    await putScratchChunk('r1~final', 0, new Blob(['FINAL-']))
+    await putScratchChunk('r1~final', 1, new Blob(['FILE']))
+
+    await replaceChunks('r1', 'r1~final')
+
+    expect(await (await loadRecordingBlob('r1'))?.text()).toBe('FINAL-FILE')
+    expect(await describeChunks('r1')).toMatchObject({ count: 2, bytes: 10 })
+    expect(await describeChunks('r1~final')).toMatchObject({ count: 0 })
+    // Scratch chunks never appear as library rows.
+    expect((await listUnfinishedRecordings()).map((row) => row.id)).toEqual(['r1'])
+  })
+
+  it('keeps the captured chunks when the scratch file is empty', async () => {
+    await beginRecording(entry('r1'), 1000)
+    await appendChunk('r1', 0, new Blob(['captured']), 1001)
+    await expect(replaceChunks('r1', 'r1~final')).rejects.toThrow(/empty/)
+    expect(await (await loadRecordingBlob('r1'))?.text()).toBe('captured')
+  })
+
+  it('deletes chunks under an id without touching any row', async () => {
+    await beginRecording(entry('r1'), 1000)
+    await putScratchChunk('r1~final', 0, new Blob(['partial']))
+    await deleteChunks('r1~final')
+    expect(await describeChunks('r1~final')).toMatchObject({ count: 0 })
+    expect(await listUnfinishedRecordings()).toHaveLength(1)
+  })
+
+  it('records the format capture chose', async () => {
+    await beginRecording(entry('r1'), 1000)
+    await setRecordingFormat('r1', 'video/mp4;codecs=avc1,mp4a.40.2', 'mp4')
+    const [row] = await listUnfinishedRecordings()
+    expect(row).toMatchObject({ mimeType: 'video/mp4;codecs=avc1,mp4a.40.2', extension: 'mp4', status: 'recording' })
   })
 })

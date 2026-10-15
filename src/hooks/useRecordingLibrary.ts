@@ -68,7 +68,10 @@ export function useRecordingLibrary(): UseRecordingLibrary {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const recovered = await recoverInterruptedRecordings()
+      const { recovered, failed } = await recoverInterruptedRecordings()
+      for (const failure of failed) {
+        showToast(`“${failure.name}” could not be recovered yet: ${failure.reason}`, 'error')
+      }
       if (recovered > 0) {
         showToast(
           `Recovered ${recovered} recording${recovered === 1 ? '' : 's'} that ${recovered === 1 ? 'was' : 'were'} interrupted. Check the library.`,

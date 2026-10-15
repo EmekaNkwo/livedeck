@@ -6,6 +6,7 @@ import {
   selectRecordingFormat,
   suggestVideoBitrate,
 } from './mime'
+import type { Mp4Capture } from './mp4-capture'
 
 /**
  * Local recording of the composed program output.
@@ -17,6 +18,13 @@ import {
  * mixer's `MediaStreamAudioDestinationNode`. So scene switches, transforms,
  * crops, hidden sources, mutes and fader moves are all in the file by
  * construction, because there is no separate render or mix for recording.
+ *
+ * HOW IT IS ENCODED
+ * ------------------
+ * Where WebCodecs can encode H.264 at the program size, frames go through
+ * {@link Mp4Capture} into fragmented MP4 (H.264 + AAC). Elsewhere
+ * MediaRecorder encodes, in whatever container the browser offers. Either
+ * way the stored file is rewritten into its final container after Stop.
  *
  * WHERE THE DATA GOES
  * -------------------
@@ -62,12 +70,15 @@ export type StartRecordingOptions = {
   sink: ChunkSink
   /** Timeslice between chunks. Default one second. */
   timesliceMs?: number
+  /** Try WebCodecs + MP4 before MediaRecorder. Default true. */
+  preferMp4?: boolean
 }
 
 const DEFAULT_TIMESLICE_MS = 1000
 
 export class RecordingEngine {
   private recorder: MediaRecorder | null = null
+  private mp4: Mp4Capture | null = null
   private captureStream: MediaStream | null = null
   private status: RecordingStatus = 'idle'
   private format: RecordingFormat | null = null
@@ -114,7 +125,7 @@ export class RecordingEngine {
   }
 
   canPause(): boolean {
-    return detectCapabilities().recorderPause
+    return this.mp4 !== null || detectCapabilities().recorderPause
   }
 
   /**
@@ -127,15 +138,6 @@ export class RecordingEngine {
     this.setStatus('starting')
     const caps = detectCapabilities()
 
-    if (!caps.mediaRecorder) {
-      this.fail({
-        code: 'unsupported',
-        message: 'This browser does not support MediaRecorder, so recording is unavailable.',
-        recoverable: false,
-        at: Date.now(),
-      })
-      return false
-    }
     if (!caps.canvasCaptureStream) {
       this.fail({
         code: 'unsupported',
@@ -147,8 +149,112 @@ export class RecordingEngine {
       return false
     }
 
+    let stream: MediaStream
+    try {
+      // Capturing at the target rate ties encoder cadence to the compositor's
+      // cadence, so a 30fps production does not get encoded as 60fps of
+      // duplicated frames.
+      stream = options.canvas.captureStream(options.frameRate)
+    } catch {
+      this.fail({
+        code: 'no-video-track',
+        message: 'The program canvas could not be captured.',
+        recoverable: true,
+        at: Date.now(),
+      })
+      return false
+    }
+
+    const videoTrack = stream.getVideoTracks()[0]
+    if (!videoTrack) {
+      this.fail({
+        code: 'no-video-track',
+        message: 'The program canvas produced no video track.',
+        recoverable: true,
+        at: Date.now(),
+      })
+      return false
+    }
+
+    this.captureStream = stream
+    this.dimensions = { width: options.canvas.width, height: options.canvas.height }
+    this.frameRate = options.frameRate
+    this.sink = options.sink
+    this.chunkIndex = 0
+    this.bytes = 0
+    this.sinkFailed = false
+    this.writeQueue = Promise.resolve()
+
+    const audioTrack = options.audioStream?.getAudioTracks()[0] ?? null
+    const videoBitrate = suggestVideoBitrate(this.dimensions.width, this.dimensions.height, options.frameRate)
+
+    const started =
+      (options.preferMp4 !== false &&
+        (await this.startMp4(videoTrack, audioTrack, options.frameRate, videoBitrate))) ||
+      this.startMediaRecorder(stream, options, videoBitrate)
+    if (!started) return false
+
+    this.accumulatedMs = 0
+    this.startedAt = performance.now()
+    this.setStatus('recording')
+    this.startTicking()
+    return true
+  }
+
+  /** WebCodecs + fragmented MP4. False when unavailable, to fall back. */
+  private async startMp4(
+    video: MediaStreamVideoTrack,
+    audio: MediaStreamAudioTrack | null,
+    frameRate: number,
+    videoBitrate: number,
+  ): Promise<boolean> {
+    try {
+      const capture = await import('./mp4-capture')
+      if (!capture.hasWebCodecs()) return false
+      const plan = await capture.planMp4Capture(
+        this.dimensions.width,
+        this.dimensions.height,
+        frameRate,
+        videoBitrate,
+        audio !== null,
+      )
+      if (!plan) return false
+      this.mp4 = await capture.Mp4Capture.start({
+        video,
+        audio,
+        plan,
+        frameRate,
+        videoBitrate,
+        onData: (data) => this.enqueueChunk(data),
+        onError: (error) => this.onMp4Error(error),
+      })
+      this.format = {
+        mimeType: capture.MP4_MIME,
+        extension: 'mp4',
+        label: plan.audioCodec === 'opus' ? 'MP4 · H.264 + Opus' : capture.MP4_FORMAT_LABEL,
+      }
+      return true
+    } catch {
+      // The encoder refused this configuration; MediaRecorder may not.
+      this.mp4 = null
+      return false
+    }
+  }
+
+  private startMediaRecorder(stream: MediaStream, options: StartRecordingOptions, videoBitrate: number): boolean {
+    if (!detectCapabilities().mediaRecorder) {
+      this.releaseCapture()
+      this.fail({
+        code: 'unsupported',
+        message: 'This browser does not support MediaRecorder, so recording is unavailable.',
+        recoverable: false,
+        at: Date.now(),
+      })
+      return false
+    }
     const format = selectRecordingFormat()
     if (!format) {
+      this.releaseCapture()
       this.fail({
         code: 'unsupported',
         message:
@@ -160,54 +266,14 @@ export class RecordingEngine {
     }
     this.format = format
 
-    let stream: MediaStream
-    try {
-      // Capturing at the target rate ties encoder cadence to the compositor's
-      // cadence, so a 30fps production does not get encoded as 60fps of
-      // duplicated frames.
-      stream = options.canvas.captureStream(options.frameRate)
-    } catch (error) {
-      this.fail({
-        code: 'no-video-track',
-        message: 'The program canvas could not be captured.',
-        recoverable: true,
-        at: Date.now(),
-      })
-      void error
-      return false
-    }
-
-    if (stream.getVideoTracks().length === 0) {
-      this.fail({
-        code: 'no-video-track',
-        message: 'The program canvas produced no video track.',
-        recoverable: true,
-        at: Date.now(),
-      })
-      return false
-    }
-
     // Combine program video with mixed program audio into one stream.
     const combined = new MediaStream(stream.getVideoTracks())
     const audioTracks = options.audioStream?.getAudioTracks() ?? []
     for (const track of audioTracks) combined.addTrack(track)
 
-    this.captureStream = stream
-    this.dimensions = { width: options.canvas.width, height: options.canvas.height }
-    this.frameRate = options.frameRate
-    this.sink = options.sink
-    this.chunkIndex = 0
-    this.bytes = 0
-    this.sinkFailed = false
-    this.writeQueue = Promise.resolve()
-
     const recorderOptions: MediaRecorderOptions = {
       mimeType: format.mimeType,
-      videoBitsPerSecond: suggestVideoBitrate(
-        this.dimensions.width,
-        this.dimensions.height,
-        options.frameRate,
-      ),
+      videoBitsPerSecond: videoBitrate,
     }
     if (audioTracks.length > 0) recorderOptions.audioBitsPerSecond = AUDIO_BITRATE
 
@@ -218,7 +284,7 @@ export class RecordingEngine {
       // options object (usually the bitrate hints). Retry bare before failing.
       try {
         this.recorder = new MediaRecorder(combined, { mimeType: format.mimeType })
-      } catch (error) {
+      } catch {
         this.releaseCapture()
         this.fail({
           code: 'recorder-error',
@@ -226,7 +292,6 @@ export class RecordingEngine {
           recoverable: false,
           at: Date.now(),
         })
-        void error
         return false
       }
     }
@@ -236,6 +301,7 @@ export class RecordingEngine {
     try {
       this.recorder.start(options.timesliceMs ?? DEFAULT_TIMESLICE_MS)
     } catch {
+      this.recorder = null
       this.releaseCapture()
       this.fail({
         code: 'recorder-error',
@@ -245,21 +311,20 @@ export class RecordingEngine {
       })
       return false
     }
-
-    this.accumulatedMs = 0
-    this.startedAt = performance.now()
-    this.setStatus('recording')
-    this.startTicking()
     return true
   }
 
   pause(): void {
-    if (this.status !== 'recording' || !this.recorder) return
-    if (!this.canPause()) return
-    try {
-      this.recorder.pause()
-    } catch {
-      return
+    if (this.status !== 'recording') return
+    if (this.mp4) {
+      this.mp4.pause()
+    } else {
+      if (!this.recorder || !this.canPause()) return
+      try {
+        this.recorder.pause()
+      } catch {
+        return
+      }
     }
     this.accumulatedMs += performance.now() - this.startedAt
     this.stopTicking()
@@ -267,11 +332,16 @@ export class RecordingEngine {
   }
 
   resume(): void {
-    if (this.status !== 'paused' || !this.recorder) return
-    try {
-      this.recorder.resume()
-    } catch {
-      return
+    if (this.status !== 'paused') return
+    if (this.mp4) {
+      this.mp4.resume()
+    } else {
+      if (!this.recorder) return
+      try {
+        this.recorder.resume()
+      } catch {
+        return
+      }
     }
     this.startedAt = performance.now()
     this.startTicking()
@@ -284,14 +354,18 @@ export class RecordingEngine {
    */
   stop(): void {
     if (this.status !== 'recording' && this.status !== 'paused') return
-    if (!this.recorder) return
+    if (!this.recorder && !this.mp4) return
     if (this.status === 'recording') {
       this.accumulatedMs += performance.now() - this.startedAt
     }
     this.stopTicking()
     this.setStatus('finalizing')
+    if (this.mp4) {
+      void this.stopMp4(this.mp4)
+      return
+    }
     try {
-      this.recorder.stop()
+      this.recorder?.stop()
     } catch {
       this.fail({
         code: 'finalize-failed',
@@ -305,6 +379,9 @@ export class RecordingEngine {
   /** Abandon an in-flight recording without producing a result. */
   cancel(): void {
     this.stopTicking()
+    const mp4 = this.mp4
+    this.mp4 = null
+    if (mp4) void mp4.cancel()
     const recorder = this.recorder
     this.recorder = null
     if (recorder && recorder.state !== 'inactive') {
@@ -348,31 +425,70 @@ export class RecordingEngine {
       this.releaseCapture()
       this.recorder = null
 
-      // Wait for the last chunk to land before claiming completion.
-      void this.writeQueue.then(() => {
-        if (this.sinkFailed) return
-        if (this.chunkIndex === 0) {
-          this.fail({
-            code: 'finalize-failed',
-            message: 'The recording finished with no data. Nothing was saved.',
-            recoverable: true,
-            at: Date.now(),
-          })
-          return
-        }
-        this.setStatus('complete')
-        this.events.onComplete?.({
-          mimeType: effectiveMime,
-          extension: extensionForMimeType(effectiveMime),
-          durationMs: Math.round(this.accumulatedMs),
-          width: this.dimensions.width,
-          height: this.dimensions.height,
-          frameRate: this.frameRate,
-          chunkCount: this.chunkIndex,
-          bytes: this.bytes,
-        })
-      })
+      this.completeAfterWrites(effectiveMime)
     }
+  }
+
+  private async stopMp4(capture: Mp4Capture): Promise<void> {
+    try {
+      // Resolves once the last fragment has been handed to the sink queue.
+      await capture.stop()
+    } catch {
+      this.mp4 = null
+      this.releaseCapture()
+      this.fail({
+        code: 'finalize-failed',
+        message: 'The encoder could not finish the file. Everything captured so far is stored and can be recovered.',
+        recoverable: true,
+        at: Date.now(),
+      })
+      return
+    }
+    this.mp4 = null
+    this.releaseCapture()
+    this.completeAfterWrites(this.format?.mimeType ?? 'video/mp4')
+  }
+
+  private onMp4Error(error: Error): void {
+    if (!this.mp4) return
+    const capture = this.mp4
+    this.mp4 = null
+    void capture.cancel()
+    this.stopTicking()
+    this.releaseCapture()
+    this.fail({
+      code: 'recorder-error',
+      message: `The encoder stopped unexpectedly (${error.message}). Everything captured so far is stored and can be recovered.`,
+      recoverable: true,
+      at: Date.now(),
+    })
+  }
+
+  /** Wait for the last chunk to land before claiming completion. */
+  private completeAfterWrites(mimeType: string): void {
+    void this.writeQueue.then(() => {
+      if (this.sinkFailed) return
+      if (this.chunkIndex === 0) {
+        this.fail({
+          code: 'finalize-failed',
+          message: 'The recording finished with no data. Nothing was saved.',
+          recoverable: true,
+          at: Date.now(),
+        })
+        return
+      }
+      this.setStatus('complete')
+      this.events.onComplete?.({
+        mimeType,
+        extension: extensionForMimeType(mimeType),
+        durationMs: Math.round(this.accumulatedMs),
+        width: this.dimensions.width,
+        height: this.dimensions.height,
+        frameRate: this.frameRate,
+        chunkCount: this.chunkIndex,
+        bytes: this.bytes,
+      })
+    })
   }
 
   private enqueueChunk(chunk: Blob): void {
@@ -390,6 +506,9 @@ export class RecordingEngine {
         const message = error instanceof Error ? error.message : String(error)
         // Stop the recorder: there is nowhere to put the next chunk.
         this.stopTicking()
+        const mp4 = this.mp4
+        this.mp4 = null
+        if (mp4) void mp4.cancel()
         const recorder = this.recorder
         this.recorder = null
         if (recorder && recorder.state !== 'inactive') {

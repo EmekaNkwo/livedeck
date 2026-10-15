@@ -1,35 +1,35 @@
 import {
-  appendChunk,
   deleteRecording,
   describeChunks,
   finishRecording,
   listUnfinishedRecordings,
-  loadChunk,
-  loadRecordingBlob,
 } from '@/services/persistence/recording-store'
-import { patchWebmDuration } from './webm-duration'
+import { finalizeRecording } from './finalize'
 
 /**
  * Turn recordings that were cut off into usable library entries.
  *
  * A row left in `recording` state means the page went away while chunks were
  * still arriving: a crash, a closed tab, a power cut. Its chunks are intact,
- * so the recording is finalized from what reached storage: the duration is
- * taken from the chunk timestamps, written into the WebM header, and the row
- * is marked complete so it shows up in the library like any other.
+ * so the recording is finalized from what reached storage, exactly as Stop
+ * would: rewritten into a standard MP4 or an indexed WebM, with the duration
+ * read from the media itself. The row is then marked complete so it shows up
+ * in the library like any other.
  *
  * A row with no chunks at all is dropped; there is nothing to recover.
  *
- * Returns the number of recordings recovered.
+ * A recording that cannot be recovered is left in place for the next attempt
+ * and reported in `failed` with the reason, so the operator hears about it.
  */
-export async function recoverInterruptedRecordings(): Promise<number> {
-  let unfinished
-  try {
-    unfinished = await listUnfinishedRecordings()
-  } catch {
-    return 0
-  }
+export type RecoveryReport = {
+  recovered: number
+  failed: Array<{ id: string; name: string; reason: string }>
+}
+
+export async function recoverInterruptedRecordings(): Promise<RecoveryReport> {
+  const unfinished = await listUnfinishedRecordings()
   let recovered = 0
+  const failed: RecoveryReport['failed'] = []
   for (const row of unfinished) {
     try {
       const chunks = await describeChunks(row.id)
@@ -38,30 +38,26 @@ export async function recoverInterruptedRecordings(): Promise<number> {
         continue
       }
       // The chunk timestamps bound the recording; the last slice is one
-      // timeslice long, which is close enough for a header.
-      const durationMs = Math.max(1000, (chunks.lastAt ?? row.startedAt) - row.startedAt + 1000)
-      let size = chunks.bytes
-      if (row.mimeType.includes('webm')) {
-        const whole = await loadRecordingBlob(row.id)
-        if (whole) {
-          const patched = await patchWebmDuration(whole, durationMs)
-          if (patched.patched) {
-            const firstSize = (await loadChunk(row.id, 0))?.size ?? 0
-            const headerLength = patched.blob.size - whole.size + firstSize
-            await appendChunk(row.id, 0, patched.blob.slice(0, headerLength), Date.now())
-            size = patched.blob.size
-          }
-        }
-      }
+      // timeslice long. Used only when the media cannot say for itself.
+      const estimateMs = Math.max(1000, (chunks.lastAt ?? row.startedAt) - row.startedAt + 1000)
+      const final = await finalizeRecording({
+        id: row.id,
+        mimeType: row.mimeType,
+        durationMs: estimateMs,
+        bytes: chunks.bytes,
+      })
       await finishRecording(row.id, {
-        durationMs,
-        size,
+        durationMs: final.durationMs,
+        size: final.size,
+        mimeType: final.mimeType,
+        extension: final.extension,
         name: row.name.includes('(recovered)') ? row.name : `${row.name} (recovered)`,
       })
       recovered += 1
-    } catch {
+    } catch (error) {
       // Leave the row for the next attempt rather than losing it.
+      failed.push({ id: row.id, name: row.name, reason: error instanceof Error ? error.message : String(error) })
     }
   }
-  return recovered
+  return { recovered, failed }
 }
