@@ -7,6 +7,7 @@ import {
   sourceRows,
   startCamera,
   useMediaServer,
+  startLobbyMedia,
 } from './fixtures'
 
 /**
@@ -173,13 +174,17 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
     const guest = await guestContext.newPage()
 
     try {
-      await openDirector(host, 'g-guestshare')
+      // Unique per run: an abruptly closed director is held in the server's
+      // resume window, so a reused name would be occupied on a repeat.
+      const room = `g-guestshare-${Date.now().toString(36)}`
+      await openDirector(host, room)
       await openTab(host, /Guests/)
       await expect(
         host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
-      await guest.goto('/push/g-guestshare')
+      await guest.goto(`/push/${room}`)
+      await startLobbyMedia(guest)
       await guest.getByLabel('Your name').fill('Ana')
       await guest.getByRole('button', { name: /Join room/i }).click()
       await expect(guestTiles(host)).toHaveCount(1, { timeout: 45_000 })
@@ -190,7 +195,7 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
       await share.click()
 
       const url = await host.evaluate(() => navigator.clipboard.readText())
-      expect(url).toContain('/solo/g-guestshare/')
+      expect(url).toContain(`/solo/${room}/`)
 
       // And it carries the guest's feed into a window that is not the control
       // room — which is the whole point of a solo link.

@@ -7,6 +7,7 @@ import {
   startCamera,
   startMicrophone,
   useMediaServer,
+  startLobbyMedia,
 } from './fixtures'
 
 /**
@@ -105,6 +106,7 @@ test.describe('Scenario F: the scene window mirrors the program', () => {
       // A guest sending *both* camera and microphone is the case that broke:
       // `ontrack` fires once per track, so the sources were created twice.
       await guest.goto('/push/mirror-guest')
+      await startLobbyMedia(guest)
       await guest.getByLabel('Your name').fill('Ana')
       await guest.getByRole('button', { name: /Join room/i }).click()
 

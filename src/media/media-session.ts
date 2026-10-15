@@ -101,6 +101,18 @@ export class MediaSession {
   /** Remote consumers by producer id. */
   private readonly consumers = new Map<string, msTypes.Consumer>()
   private readonly consuming = new Set<string>()
+  /**
+   * Producer creation in flight, by source.
+   *
+   * `produce` is called from effects that can fire again before the first
+   * call resolves. Without this, two calls for one source both saw no
+   * producer and created two: the server kept the second, the browser kept
+   * encoding both, and receivers could be handed the one the server had
+   * already closed.
+   */
+  private readonly producing = new Map<MediaSource, Promise<void>>()
+  /** Consumers the server closed while our consume call was still in flight. */
+  private readonly closedConsumerIds = new Set<string>()
   private readonly participants = new Map<string, Participant>()
   private readonly knownProducers = new Map<string, ProducerInfo>()
   private join: JoinOptions | null = null
@@ -164,6 +176,15 @@ export class MediaSession {
   /** Publish a local track. Replaces an existing producer of the same source. */
   async produce(source: MediaSource, track: MediaStreamTrack): Promise<void> {
     this.localTracks.set(source, track)
+    // A creation already in flight for this source picks up the latest track.
+    const pending = this.producing.get(source)
+    if (pending) {
+      await pending
+      const created = this.producers.get(source)
+      if (created && !created.closed && created.track !== track) await created.replaceTrack({ track })
+      this.publishProducers()
+      return
+    }
     const existing = this.producers.get(source)
     if (existing && !existing.closed) {
       if (existing.track === track) return
@@ -178,6 +199,8 @@ export class MediaSession {
   /** Stop publishing a source. */
   async closeProducer(source: MediaSource): Promise<void> {
     this.localTracks.delete(source)
+    // A creation in flight finishes first, so it cannot outlive the close.
+    await this.producing.get(source)?.catch(() => undefined)
     const producer = this.producers.get(source)
     this.producers.delete(source)
     if (!producer) return
@@ -437,7 +460,22 @@ export class MediaSession {
     }
   }
 
-  private async createProducer(source: MediaSource, track: MediaStreamTrack): Promise<void> {
+  /** Serialize producer creation per source; see {@link producing}. */
+  private createProducer(source: MediaSource, track: MediaStreamTrack): Promise<void> {
+    const previous = this.producing.get(source) ?? Promise.resolve()
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.createProducerNow(source, this.localTracks.get(source) ?? track))
+    const tracked = next.finally(() => {
+      if (this.producing.get(source) === tracked) this.producing.delete(source)
+    })
+    this.producing.set(source, tracked)
+    return tracked
+  }
+
+  private async createProducerNow(source: MediaSource, track: MediaStreamTrack): Promise<void> {
+    // The source may have been closed while this waited its turn.
+    if (!this.localTracks.has(source)) return
     const transport = this.sendTransport
     if (!transport || transport.closed) return
     const existing = this.producers.get(source)
@@ -496,7 +534,7 @@ export class MediaSession {
         this.options.operationTimeoutMs,
         `Receiving ${info.source}`,
       )
-      if (this.consumers.has(info.id)) return
+      if (this.consumers.has(info.id) || !this.knownProducers.has(info.id)) return
       const consumer = await transport.consume({
         id: params.consumerId,
         producerId: params.producerId,
@@ -504,6 +542,16 @@ export class MediaSession {
         rtpParameters: params.rtpParameters as unknown as msTypes.RtpParameters,
         appData: { participantId: params.participantId, source: params.source },
       })
+      /*
+       * The producer may have closed while the consume call was in flight:
+       * its producerClosed / consumerClosed notifications then arrived before
+       * there was a consumer to drop. Handing that consumer to the UI would
+       * show a frozen track in place of the live one.
+       */
+      if (!this.knownProducers.has(info.id) || this.closedConsumerIds.has(consumer.id)) {
+        consumer.close()
+        return
+      }
       this.consumers.set(info.id, consumer)
       const remote: RemoteTrack = {
         consumerId: consumer.id,
@@ -600,6 +648,7 @@ export class MediaSession {
         const { consumerId } = data as NotificationData<'consumerClosed'>
         const entry = [...this.consumers.entries()].find(([, c]) => c.id === consumerId)
         if (entry) this.dropConsumer(entry[0])
+        else this.closedConsumerIds.add(consumerId)
         return
       }
       case 'consumerPaused':

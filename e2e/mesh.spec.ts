@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { openDirector, openTab, startCamera, useMediaServer } from './fixtures'
+import { openDirector, openTab, startCamera, startLobbyMedia, useMediaServer } from './fixtures'
 
 /**
  * Scenario H — guests seeing each other, with and without a director.
@@ -17,11 +17,17 @@ import { openDirector, openTab, startCamera, useMediaServer } from './fixtures'
  * conclusions.
  */
 
-/** Join a room through the lobby, as a guest with a name. */
-async function joinAs(page: Page, room: string, name: string): Promise<void> {
+/**
+ * Join a room through the lobby, as a guest with a name.
+ *
+ * Camera and microphone are started first unless `media` is false: joining
+ * switches nothing on, and most of these tests are about seeing each other.
+ */
+async function joinAs(page: Page, room: string, name: string, options: { media?: boolean } = {}): Promise<void> {
   await page.goto(`/push/${room}`)
   const join = page.getByRole('button', { name: /Join room/i })
   await expect(join).toBeEnabled({ timeout: 30_000 })
+  if (options.media !== false) await startLobbyMedia(page)
   await page.getByLabel('Your name').fill(name)
   await join.click()
 }
@@ -216,7 +222,7 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
     const page = await context.newPage()
 
     try {
-      await joinAs(page, 'mesh-consent', 'Ana')
+      await joinAs(page, 'mesh-consent', 'Ana', { media: false })
 
       // Both controls still read "on" — i.e. they are off and offering to start.
       await expect(page.getByRole('button', { name: 'Turn camera on' })).toBeVisible()
@@ -235,13 +241,10 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
   })
 
   /**
-   * A track that only appears after the connection is established.
+   * A track that only appears after joining.
    *
-   * There is no renegotiation anywhere in this project, so the m-lines present
-   * at offer time are all there will ever be. They used to be declared
-   * `recvonly`, which left no sender to put a later track into — so a guest who
-   * joined with their camera off stayed invisible for the whole call however
-   * many times they pressed the button.
+   * Turning the camera on publishes a new producer; the server announces it
+   * and every other participant consumes it. Nobody renegotiates with anybody.
    */
   test('turning a camera on after joining reaches the other guest', async ({ browser }) => {
     const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
@@ -253,8 +256,8 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
 
     try {
       // Both join with nothing running.
-      await joinAs(ana, 'mesh-late', 'Ana')
-      await joinAs(bo, 'mesh-late', 'Bo')
+      await joinAs(ana, 'mesh-late', 'Ana', { media: false })
+      await joinAs(bo, 'mesh-late', 'Bo', { media: false })
       await expect(tileFor(bo, 'Ana')).toBeVisible({ timeout: 45_000 })
 
       // Now Ana starts her camera, well after the handshake completed.
@@ -277,7 +280,7 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
    * Chromium's `--auto-select-desktop-capture-source` answers the browser's
    * own picker, which the app can never do itself.
    */
-  test('a guest screen share replaces their camera and takes the featured cell', async ({
+  test('a guest screen share gets its own featured region', async ({
     browser,
   }) => {
     const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
@@ -313,9 +316,8 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
         })
         .toBeGreaterThanOrEqual(2)
 
-      // The sharer is told over the control channel — WebRTC carries no hint
-      // about what a track is *of*, so without the report the receiver cannot
-      // tell a shared document from a face.
+      // The screen producer carries its source, and the server marks the
+      // sharer, so the receiver knows a document from a face.
       await expect(tileFor(bo, 'Ana').getByText('sharing')).toBeVisible({ timeout: 30_000 })
 
       // The sharer is never shown their own screen: sharing the tab that holds

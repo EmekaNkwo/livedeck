@@ -133,7 +133,51 @@ describe('producing', () => {
   })
 })
 
+describe('producer races', () => {
+  it('two concurrent produce calls for one source create one producer with the latest track', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const first = fakeTrack('video')
+    const second = fakeTrack('video')
+    await Promise.all([session.produce('camera', first), session.produce('camera', second)])
+    const send = device.transports[0]!
+    expect(send.producers).toHaveLength(1)
+    expect(send.producers[0]?.track).toBe(second)
+    expect(signaling.requests.filter((r) => r.method === 'produce')).toHaveLength(1)
+  })
+
+  it('closing a source while its producer is being created leaves no producer', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const creating = session.produce('camera', fakeTrack('video'))
+    await session.closeProducer('camera')
+    await creating
+    expect(session.current.producers).toEqual([])
+    expect(device.transports[0]?.producers.every((p) => p.closed)).toBe(true)
+  })
+})
+
 describe('consuming', () => {
+  it('drops a consumer whose producer closed while the consume call was in flight', async () => {
+    signaling.participants = [participant('a')]
+    await session.start({ room: 'studio', label: 'Me' })
+    const info = producerInfo('pa1', 'a', 'camera', 'video')
+    signaling.producers = [info]
+    const realRequest = signaling.request.bind(signaling)
+    signaling.request = (async (method: string, params: unknown) => {
+      const result = await realRequest(method as never, params as never)
+      if (method === 'consume') {
+        // The server closes the producer before our consume call returns.
+        signaling.notify('producerClosed', { producerId: 'pa1', participantId: 'a' })
+        signaling.notify('consumerClosed', { consumerId: (result as { consumerId: string }).consumerId })
+      }
+      return result
+    }) as typeof signaling.request
+    signaling.notify('newProducer', { producer: info })
+    await flush()
+    await flush()
+    expect(session.current.tracks).toEqual([])
+    expect(device.transports[1]?.consumers.every((c) => c.closed)).toBe(true)
+  })
+
   it('consumes every producer present at join, resumes each, and never its own', async () => {
     signaling.participants = [participant('a')]
     signaling.producers = [

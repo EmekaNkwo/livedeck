@@ -166,6 +166,19 @@ export class Room {
       if (state === 'failed' || state === 'closed') {
         this.log('transport-dtls', { peerId: peer.id, transportId: transport.id, state })
       }
+      /*
+       * Ask for a fresh keyframe once media can actually flow.
+       *
+       * A receive transport connects lazily on its first consume, and the
+       * consumers are resumed straight away. The keyframe mediasoup requests
+       * on resume can therefore reach the browser before DTLS is up and be
+       * dropped; every frame after it is a delta that cannot be decoded until
+       * the browser's own keyframe request fires, seconds later. Requesting
+       * again on connect makes first frames arrive at once.
+       */
+      if (state === 'connected' && direction === 'recv') {
+        void this.requestKeyFrames(peer, transport.id)
+      }
     })
     transport.on('routerclose', () => {
       peer.transports.delete(transport.id)
@@ -318,7 +331,12 @@ export class Room {
       // Paused until the client has wired the track; otherwise the first
       // frames arrive before anything can render them.
       paused: true,
-      appData: { peerId: peer.id, producerPeerId: found.peer.id, source: found.entry.source },
+      appData: {
+        peerId: peer.id,
+        producerPeerId: found.peer.id,
+        source: found.entry.source,
+        transportId: transport.id,
+      },
     })
     const entry = {
       consumer,
@@ -361,7 +379,24 @@ export class Room {
   }
 
   async resumeConsumer(peer: Peer, consumerId: string): Promise<void> {
-    await this.getConsumer(peer, consumerId).resume()
+    const consumer = this.getConsumer(peer, consumerId)
+    await consumer.resume()
+    // mediasoup asks for one on resume too; asking again is cheap and covers
+    // a resume that raced the transport coming up.
+    if (consumer.kind === 'video') await consumer.requestKeyFrame().catch(() => undefined)
+  }
+
+  /** Request a keyframe for every live video consumer on one transport. */
+  async requestKeyFrames(peer: Peer, transportId: string): Promise<number> {
+    let requested = 0
+    for (const entry of peer.consumers.values()) {
+      const consumer = entry.consumer
+      if (consumer.closed || consumer.paused || consumer.kind !== 'video') continue
+      if ((consumer.appData as { transportId?: string }).transportId !== transportId) continue
+      await consumer.requestKeyFrame().catch(() => undefined)
+      requested += 1
+    }
+    return requested
   }
 
   async pauseConsumer(peer: Peer, consumerId: string): Promise<void> {

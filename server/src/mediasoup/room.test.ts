@@ -204,6 +204,26 @@ describe('Room', () => {
     room.close('room-closed')
   })
 
+  it('requests keyframes for the live video consumers on one transport only', async () => {
+    const room = await makeRoom()
+    const a = makePeer('a')
+    const b = makePeer('b')
+    room.addPeer(a.peer)
+    room.addPeer(b.peer)
+    const sendA = await room.createTransport(a.peer, 'send')
+    const video = await room.produce(a.peer, { transportId: sendA.id, kind: 'video', rtpParameters: videoRtpParameters(3601), source: 'camera' })
+    const audio = await room.produce(a.peer, { transportId: sendA.id, kind: 'audio', rtpParameters: audioRtpParameters(3602), source: 'mic' })
+    const recvB = await room.createTransport(b.peer, 'recv')
+    const v = await room.consume(b.peer, { producerId: video, rtpCapabilities: room.rtpCapabilities as never })
+    await room.consume(b.peer, { producerId: audio, rtpCapabilities: room.rtpCapabilities as never })
+    // Paused consumers are skipped; the server creates them paused.
+    expect(await room.requestKeyFrames(b.peer, recvB.id)).toBe(0)
+    await room.resumeConsumer(b.peer, v.consumerId)
+    expect(await room.requestKeyFrames(b.peer, recvB.id)).toBe(1)
+    expect(await room.requestKeyFrames(b.peer, 'other-transport')).toBe(0)
+    room.close('room-closed')
+  })
+
   it('refuses a consumer the browser cannot decode', async () => {
     const room = await makeRoom()
     const a = makePeer('a')

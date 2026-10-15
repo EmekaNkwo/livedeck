@@ -89,6 +89,19 @@ export async function dropSockets(page: Page): Promise<number> {
   })
 }
 
+/**
+ * Turn on the guest's camera and microphone in the lobby.
+ *
+ * Joining switches nothing on by design, so a test that is about seeing or
+ * hearing somebody has to start their devices first, as a real guest would.
+ */
+export async function startLobbyMedia(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Turn camera on' }).click()
+  await expect(page.getByRole('button', { name: 'Turn camera off' })).toBeVisible({ timeout: 20_000 })
+  await page.getByRole('button', { name: 'Turn microphone on' }).click()
+  await expect(page.getByRole('button', { name: 'Turn microphone off' })).toBeVisible({ timeout: 20_000 })
+}
+
 /** The participant id the page joined as, once joined. */
 export async function selfParticipantId(page: Page): Promise<string | null> {
   return page.evaluate(() => {
