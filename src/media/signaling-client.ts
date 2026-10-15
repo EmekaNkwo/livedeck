@@ -114,6 +114,15 @@ export class SignalingClient {
     await this.open()
   }
 
+  /** The network came back: skip the remaining backoff and dial now. */
+  reconnectNow(): void {
+    if (this.closedByUser || this.state === 'connected' || this.state === 'connecting') return
+    if (!this.reconnectTimer) return
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+    void this.open().catch(() => undefined)
+  }
+
   close(): void {
     this.closedByUser = true
     this.clearTimers()

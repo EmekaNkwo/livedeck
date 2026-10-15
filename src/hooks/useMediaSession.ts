@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { ControlAction, IceServer, MediaSource } from '@shared/protocol'
 import { MediaSession } from '@/media/media-session'
+import { QualityController } from '@/media/quality-controller'
 import { useMediaSessionStore } from '@/media/session-store'
+import { useGuestStore } from '@/stores/guestStore'
 import type { JoinOptions, SessionSnapshot } from '@/media/types'
 import { parseIceServerUrls } from '@/services/signaling/ice-servers'
 import { resolveRelayUrl } from '@/services/signaling/relay-url'
@@ -40,6 +42,7 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
   const showToast = useStudioStore((state) => state.showToast)
   const snapshot = useMediaSessionStore((state) => state.snapshot)
   const attach = useMediaSessionStore((state) => state.attach)
+  const setQuality = useMediaSessionStore((state) => state.setQuality)
   const sessionRef = useRef<MediaSession | null>(null)
 
   const extraIceServers = useMemo<IceServer[]>(() => parseIceServerUrls(iceServerUrls), [iceServerUrls])
@@ -65,13 +68,37 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
     void session.start({ room, label, key, role, claim }).catch(() => {
       // Reported through the error event and the snapshot's `error`.
     })
+
+    const quality = new QualityController(session, {
+      onReport: (report, perParticipant) => {
+        setQuality(report)
+        const setPeerStats = useGuestStore.getState().setPeerStats
+        for (const [participantId, stats] of perParticipant) setPeerStats(participantId, stats)
+      },
+    })
+    quality.start()
+
+    // A laptop waking or a network coming back is the moment to check, not
+    // the next heartbeat.
+    const onWake = () => {
+      if (document.visibilityState === 'hidden') return
+      session.reconnectNow()
+      void session.checkHealth()
+    }
+    window.addEventListener('online', onWake)
+    document.addEventListener('visibilitychange', onWake)
+
     return () => {
+      window.removeEventListener('online', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      quality.stop()
       offError()
       session.leave()
       detach()
+      setQuality(null)
       if (sessionRef.current === session) sessionRef.current = null
     }
-  }, [attach, claim, key, label, role, room, url])
+  }, [attach, claim, key, label, role, room, setQuality, url])
 
   const produce = useCallback(
     (source: MediaSource, track: MediaStreamTrack) => sessionRef.current?.produce(source, track) ?? Promise.resolve(),

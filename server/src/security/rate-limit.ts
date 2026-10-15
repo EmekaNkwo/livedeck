@@ -28,6 +28,7 @@ export const METHOD_CATEGORY: Record<RequestMethod, RateCategory> = {
   resumeConsumer: 'media',
   pauseConsumer: 'media',
   closeConsumer: 'media',
+  setConsumerLayers: 'media',
   pauseProducer: 'media',
   resumeProducer: 'media',
   closeProducer: 'media',

@@ -298,6 +298,11 @@ export class Room {
     }
     const found = this.findProducer(options.producerId)
     if (!found) throw new RoomError('unknown-producer', 'That media stream no longer exists.')
+    // Mix-minus is a property of the topology: nobody receives their own
+    // media back. Enforced here so no client can undo it.
+    if (found.peer.id === peer.id) {
+      throw new RoomError('forbidden', 'A participant cannot consume its own media.')
+    }
     const rtpCapabilities = options.rtpCapabilities as unknown as types.RtpCapabilities
     if (!this.router.canConsume({ producerId: options.producerId, rtpCapabilities })) {
       throw new RoomError('media-error', 'This browser cannot decode that stream.')
@@ -361,6 +366,16 @@ export class Room {
 
   async pauseConsumer(peer: Peer, consumerId: string): Promise<void> {
     await this.getConsumer(peer, consumerId).pause()
+  }
+
+  async setConsumerLayers(
+    peer: Peer,
+    consumerId: string,
+    layers: { spatialLayer: number; temporalLayer?: number },
+  ): Promise<void> {
+    const consumer = this.getConsumer(peer, consumerId)
+    if (consumer.kind !== 'video') return
+    await consumer.setPreferredLayers(layers)
   }
 
   closeConsumer(peer: Peer, consumerId: string): void {

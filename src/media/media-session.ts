@@ -242,11 +242,44 @@ export class MediaSession {
     return result
   }
 
-  /** Ask the SFU for a lower or higher simulcast layer of a remote video. */
-  async setPreferredLayers(): Promise<void> {
-    // Layer selection is a server-side operation in mediasoup; exposed here
-    // so the quality manager has one place to call once the protocol carries
-    // it. Intentionally a no-op until then.
+  /** Ask the SFU for a simulcast layer on every remote video consumer. */
+  async setPreferredSpatialLayer(spatialLayer: number): Promise<void> {
+    const signaling = this.signaling
+    if (!signaling || this.snapshot.status !== 'joined') return
+    await Promise.all(
+      [...this.consumers.values()]
+        .filter((consumer) => consumer.kind === 'video' && !consumer.closed)
+        .map((consumer) =>
+          signaling.request('setConsumerLayers', { consumerId: consumer.id, spatialLayer }).catch(() => undefined),
+        ),
+    )
+  }
+
+  /** Cap the simulcast layers this participant sends for a source. */
+  async setMaxSpatialLayer(source: MediaSource, layer: number): Promise<void> {
+    const producer = this.producers.get(source)
+    if (!producer || producer.closed || producer.kind !== 'video') return
+    try {
+      await producer.setMaxSpatialLayer(layer)
+    } catch {
+      // A single-layer producer (screen) cannot be capped; nothing to do.
+    }
+  }
+
+  /** The network came back: dial the server now rather than after backoff. */
+  reconnectNow(): void {
+    this.signaling?.reconnectNow()
+  }
+
+  /** Wake-up hook: after a sleep or a network change, make sure media flows. */
+  async checkHealth(): Promise<void> {
+    if (this.closed || this.snapshot.status !== 'joined') return
+    const stale = [this.sendTransport, this.recvTransport].filter(
+      (transport): transport is msTypes.Transport =>
+        Boolean(transport && !transport.closed) &&
+        (transport?.connectionState === 'disconnected' || transport?.connectionState === 'failed'),
+    )
+    await Promise.all(stale.map((transport) => this.restartIce(transport)))
   }
 
   /** Leave the room and release everything. Idempotent. */

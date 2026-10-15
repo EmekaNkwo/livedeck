@@ -218,6 +218,15 @@ const closeConsumer: Handler<'closeConsumer'> = async (ctx, params) => {
   return {}
 }
 
+const setConsumerLayers: Handler<'setConsumerLayers'> = async (ctx, params) => {
+  const { peer, room } = requireJoined(ctx)
+  await room.setConsumerLayers(peer, params.consumerId, {
+    spatialLayer: params.spatialLayer,
+    ...(params.temporalLayer !== undefined ? { temporalLayer: params.temporalLayer } : {}),
+  })
+  return {}
+}
+
 const pauseProducer: Handler<'pauseProducer'> = async (ctx, params) => {
   const { peer, room } = requireJoined(ctx)
   await room.pauseProducer(peer, params.producerId)
@@ -309,6 +318,7 @@ const HANDLERS: { [M in RequestMethod]: Handler<M> } = {
   resumeConsumer,
   pauseConsumer,
   closeConsumer,
+  setConsumerLayers,
   pauseProducer,
   resumeProducer,
   closeProducer,

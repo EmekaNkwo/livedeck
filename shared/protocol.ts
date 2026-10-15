@@ -188,6 +188,12 @@ export const RequestSchemas = {
   resumeConsumer: z.object({ consumerId: IdSchema }),
   pauseConsumer: z.object({ consumerId: IdSchema }),
   closeConsumer: z.object({ consumerId: IdSchema }),
+  /** Ask the SFU for a particular simulcast layer of a video consumer. */
+  setConsumerLayers: z.object({
+    consumerId: IdSchema,
+    spatialLayer: z.number().int().min(0).max(2),
+    temporalLayer: z.number().int().min(0).max(2).optional(),
+  }),
   pauseProducer: z.object({ producerId: IdSchema }),
   resumeProducer: z.object({ producerId: IdSchema }),
   closeProducer: z.object({ producerId: IdSchema }),
@@ -251,6 +257,7 @@ export const ResponseSchemas = {
   resumeConsumer: z.object({}),
   pauseConsumer: z.object({}),
   closeConsumer: z.object({}),
+  setConsumerLayers: z.object({}),
   pauseProducer: z.object({}),
   resumeProducer: z.object({}),
   closeProducer: z.object({}),

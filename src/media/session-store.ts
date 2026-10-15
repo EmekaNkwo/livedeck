@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { MediaSession } from './media-session'
+import type { QualityReport } from './quality-controller'
 import { INITIAL_SNAPSHOT, type SessionSnapshot } from './types'
 
 /**
@@ -15,12 +16,16 @@ import { INITIAL_SNAPSHOT, type SessionSnapshot } from './types'
 type SessionStoreState = {
   session: MediaSession | null
   snapshot: SessionSnapshot
+  quality: QualityReport | null
   attach: (session: MediaSession) => () => void
+  setQuality: (quality: QualityReport | null) => void
 }
 
 export const useMediaSessionStore = create<SessionStoreState>()((set, get) => ({
   session: null,
   snapshot: INITIAL_SNAPSHOT,
+  quality: null,
+  setQuality: (quality) => set({ quality }),
   attach: (session) => {
     const off = session.on('snapshot', (snapshot) => {
       if (get().session === session) set({ snapshot })
@@ -28,7 +33,7 @@ export const useMediaSessionStore = create<SessionStoreState>()((set, get) => ({
     set({ session, snapshot: session.current })
     return () => {
       off()
-      if (get().session === session) set({ session: null, snapshot: INITIAL_SNAPSHOT })
+      if (get().session === session) set({ session: null, snapshot: INITIAL_SNAPSHOT, quality: null })
     }
   },
 }))

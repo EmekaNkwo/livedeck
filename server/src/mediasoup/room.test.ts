@@ -185,6 +185,25 @@ describe('Room', () => {
     room.close('room-closed')
   })
 
+  it('never lets a participant consume its own media (mix-minus)', async () => {
+    const room = await makeRoom()
+    const a = makePeer('a')
+    room.addPeer(a.peer)
+    const sendA = await room.createTransport(a.peer, 'send')
+    await room.createTransport(a.peer, 'recv')
+    const producerId = await room.produce(a.peer, {
+      transportId: sendA.id,
+      kind: 'audio',
+      rtpParameters: audioRtpParameters(3501),
+      source: 'mic',
+    })
+    await expect(
+      room.consume(a.peer, { producerId, rtpCapabilities: room.rtpCapabilities as never }),
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    expect(a.peer.consumers.size).toBe(0)
+    room.close('room-closed')
+  })
+
   it('refuses a consumer the browser cannot decode', async () => {
     const room = await makeRoom()
     const a = makePeer('a')
