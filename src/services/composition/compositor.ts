@@ -1,6 +1,8 @@
 import type { CropInsets, Size } from '@/types/geometry'
 import type { MediaSource, SceneItem, TextStyle } from '@/types/source'
 import { resolveCropRect } from '@/utils/geometry'
+import { assetCache } from './asset-cache'
+import { FrameClock } from './frame-clock'
 import type { Frame } from './frame-providers'
 import { resolveFrame } from './frame-providers'
 import type { CompositionSnapshot, ResolvedScene } from './composition-model'
@@ -30,8 +32,11 @@ import {
  *
  * SCHEDULING
  * ----------
- * Driven by `requestAnimationFrame` but gated to a target frame rate, and
- * skipped entirely when nothing is animating and no live media is on screen.
+ * Driven by a {@link FrameClock}: `requestAnimationFrame` while the tab is
+ * visible, a worker-timed metronome while it is hidden, so a recording or a
+ * mirror window keeps receiving frames when the operator switches tabs.
+ * Gated to a target frame rate, and skipped entirely when nothing is
+ * animating and no live media is on screen.
  */
 
 export type CompositorStats = {
@@ -53,7 +58,8 @@ export class CanvasCompositor {
   private scratchB: HTMLCanvasElement | null = null
 
   private getSnapshot: SnapshotSource = () => EMPTY_SNAPSHOT
-  private rafId = 0
+  private readonly clock = new FrameClock()
+  private unsubscribeAssets: (() => void) | null = null
   private running = false
   private sizeLocked = false
 
@@ -89,10 +95,22 @@ export class CanvasCompositor {
      */
     this.ctx = canvas.getContext('2d', { alpha: false })
     this.lastRevision = -1
+    // A decoded image or a video's first frame changes what a static scene
+    // looks like without any store revision moving; invalidate so the next
+    // tick repaints it.
+    this.unsubscribeAssets?.()
+    this.unsubscribeAssets = assetCache.onReady(() => this.invalidate())
+  }
+
+  /** Force a repaint on the next tick, whatever the revision says. */
+  invalidate(): void {
+    this.lastRevision = -1
   }
 
   detach(): void {
     this.stop()
+    this.unsubscribeAssets?.()
+    this.unsubscribeAssets = null
     this.canvas = null
     this.ctx = null
     this.scratchA = null
@@ -109,6 +127,7 @@ export class CanvasCompositor {
 
   setTargetFps(fps: number): void {
     this.targetFps = Math.max(1, Math.min(60, fps))
+    this.clock.setFps(this.targetFps)
   }
 
   /** Resize the logical output. No-op when the size is unchanged. */
@@ -145,18 +164,20 @@ export class CanvasCompositor {
     this.running = true
     this.fpsWindowStart = performance.now()
     this.fpsWindowFrames = 0
-    const tick = () => {
-      if (!this.running) return
-      this.rafId = requestAnimationFrame(tick)
-      this.onAnimationFrame()
-    }
-    this.rafId = requestAnimationFrame(tick)
+    this.clock.setFps(this.targetFps)
+    this.clock.start(() => {
+      if (this.running) this.onAnimationFrame()
+    })
   }
 
   stop(): void {
     this.running = false
-    if (this.rafId) cancelAnimationFrame(this.rafId)
-    this.rafId = 0
+    this.clock.stop()
+  }
+
+  /** Which clock is driving frames right now, for diagnostics. */
+  getClockMode(): 'raf' | 'worker' | 'interval' {
+    return this.clock.currentMode
   }
 
   isRunning(): boolean {

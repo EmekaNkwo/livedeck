@@ -43,6 +43,17 @@ export type AssetEntry =
 
 class AssetCache {
   private readonly entries = new Map<string, AssetEntry>()
+  private readonly readyListeners = new Set<() => void>()
+
+  /** Called whenever an asset finishes decoding. The compositor repaints on it. */
+  onReady(listener: () => void): () => void {
+    this.readyListeners.add(listener)
+    return () => this.readyListeners.delete(listener)
+  }
+
+  private notifyReady(): void {
+    for (const listener of this.readyListeners) listener()
+  }
 
   /**
    * Begin decoding an asset for `sourceId`. Idempotent: calling it again with
@@ -100,6 +111,7 @@ class AssetCache {
       entry.element.decoding = 'async'
       entry.element.onload = () => {
         entry.ready = true
+        this.notifyReady()
       }
       entry.element.onerror = () => {
         entry.error = 'The image could not be decoded.'
@@ -116,6 +128,7 @@ class AssetCache {
       video.preload = 'auto'
       video.onloadeddata = () => {
         entry.ready = true
+        this.notifyReady()
       }
       video.onerror = () => {
         entry.error = 'The video could not be decoded.'
