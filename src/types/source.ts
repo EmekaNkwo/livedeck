@@ -47,8 +47,8 @@ export type SourceSettings =
   | { kind: 'camera'; deviceId: string | null; mirrored: boolean }
   | { kind: 'microphone'; deviceId: string | null }
   | { kind: 'screen'; withSystemAudio: boolean }
-  | { kind: 'remote-video'; guestId: string }
-  | { kind: 'remote-audio'; guestId: string }
+  | { kind: 'remote-video'; guestId: string; screen?: boolean }
+  | { kind: 'remote-audio'; guestId: string; screen?: boolean }
   | { kind: 'image'; dataUrl: string; fit: ObjectFit }
   | { kind: 'video'; dataUrl: string; loop: boolean; fit: ObjectFit }
   | { kind: 'text'; text: string; style: TextStyle }

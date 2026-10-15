@@ -185,6 +185,17 @@ describe('joining', () => {
     await client.expectError('getRoomKeys', {}, 'forbidden')
   })
 
+  it('lets the first studio claim an empty room, and nobody after', async () => {
+    const first = await connect()
+    const claimed = await first.request('join', { room: 'studio', label: 'Studio', claim: true })
+    expect(claimed.role).toBe('director')
+    await expect(first.request('getRoomKeys', {})).resolves.toEqual(keys.keysFor('studio'))
+    const second = await connect()
+    const late = await second.request('join', { room: 'studio', label: 'Impostor', claim: true })
+    expect(late.role).toBe('guest')
+    await second.expectError('getRoomKeys', {}, 'forbidden')
+  })
+
   it('gives the director the keys', async () => {
     const { client } = await joinAs('Dir', keys.keysFor('studio').directorKey)
     await expect(client.request('getRoomKeys', {})).resolves.toEqual(keys.keysFor('studio'))

@@ -35,26 +35,19 @@ export type StudioSettings = {
   previewFrameRate: FrameRateId
   /** Route mixer output to local speakers. Off by default (feedback risk). */
   monitorProgramAudio: boolean
-  iceServerUrls: string[]
-
   /**
-   * Which signaling transport to use.
+   * Extra ICE servers, merged after the ones the media server issues.
    *
-   * `server` is the default: guests join by opening the room link and appear
-   * automatically, which is the workflow people expect from a meeting tool, and
-   * it enables trickle ICE. It requires the relay in `server/` to be running.
-   *
-   * `manual` remains fully supported as the zero-infrastructure fallback —
-   * connection details travel inside the invite link's fragment and the guest's
-   * answer comes back by hand. See README › Signaling transports.
+   * One URL per entry; TURN credentials as `turn:host:port|username:password`.
+   * Normally empty: the server hands out its own STUN and per-session TURN.
    */
-  signalingTransport: 'manual' | 'server'
+  iceServerUrls: string[]
   /**
-   * Base URL of the relay. Only used when `signalingTransport` is `server`.
+   * Base URL of the media server.
    *
-   * Blank means "work it out" — see `services/signaling/relay-url.ts`. It is
-   * left blank by default rather than hardcoded so that a studio deployed
-   * behind a proxy resolves to its own origin instead of someone's localhost.
+   * Blank means "work it out" — see `services/signaling/relay-url.ts`. Left
+   * blank by default so a studio deployed behind a proxy resolves to its own
+   * origin instead of someone's localhost.
    */
   signalingServerUrl: string
 }
@@ -67,10 +60,7 @@ export const DEFAULT_SETTINGS: StudioSettings = {
   reducedMotion: 'system',
   previewFrameRate: 30,
   monitorProgramAudio: false,
-  iceServerUrls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
-  // Rooms by default: a guest opens the room link and appears, with no code to
-  // carry back. Manual is one setting away for installs with no relay.
-  signalingTransport: 'server',
+  iceServerUrls: [],
   signalingServerUrl: '',
 }
 

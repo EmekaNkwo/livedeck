@@ -173,4 +173,5 @@ export const streamKeys = {
   microphone: (deviceId: string | null) => `mic:${deviceId ?? 'default'}`,
   screen: () => 'screen:primary',
   guest: (guestId: string) => `guest:${guestId}`,
+  guestScreen: (guestId: string) => `guest-screen:${guestId}`,
 }

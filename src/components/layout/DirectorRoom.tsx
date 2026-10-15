@@ -20,7 +20,7 @@ import { useRecording } from '@/hooks/useRecording'
 import { useSceneManager } from '@/hooks/useSceneManager'
 import { useSolo } from '@/hooks/useSolo'
 import { useSourceTransform } from '@/hooks/useSourceTransform'
-import type { UseWebRTC } from '@/hooks/useWebRTC'
+import type { DirectorMedia } from '@/hooks/useDirectorMedia'
 import { useSourceStore } from '@/stores/sourceStore'
 import { useStudioStore } from '@/stores/studioStore'
 
@@ -28,7 +28,9 @@ import { Button } from '@/components/shared/Button'
 import { EmptyState, Notice } from '@/components/shared/Status'
 import { AudioMixerPanel } from '@/components/audio/AudioMixerPanel'
 import { GuestTile } from '@/components/guests/GuestTile'
-import { InvitePanel } from '@/components/guests/InvitePanel'
+import { RoomInvitePanel } from '@/components/guests/RoomInvitePanel'
+import { resolveRelayUrl } from '@/services/signaling/relay-url'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { RecordingControls } from '@/components/recording/RecordingControls'
 import { SceneStrip } from '@/components/scenes/SceneStrip'
 import { CaptureControls } from '@/components/sources/CaptureControls'
@@ -99,10 +101,10 @@ const TABS: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
 
 export type DirectorRoomProps = {
   room: string
-  webrtc: UseWebRTC
+  media: DirectorMedia
 }
 
-export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
+export function DirectorRoom({ room, media }: DirectorRoomProps) {
   const [tab, setTab] = useState<Tab>('guests')
   const [cueText, setCueText] = useState('')
 
@@ -200,8 +202,13 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
    * director can send them, and it costs one message per state change.
    */
   useEffect(() => {
-    director.broadcastOnAir(recording.isRecording)
+    void director.broadcastOnAir(recording.isRecording)
   }, [director, recording.isRecording])
+
+  const configuredServerUrl = useSettingsStore((state) => state.settings.signalingServerUrl)
+  const serverUrl = resolveRelayUrl(configuredServerUrl)
+  const guestLink = invite.roleLink('push', room)
+  const producerLink = media.keys ? invite.roleLink('push', room, { key: media.keys.producerKey }) : null
 
   const connectedCount = guests.guests.filter((view) => view.connected).length
 
@@ -332,15 +339,15 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
                     variant="secondary"
                     size="sm"
                     disabled={!cueText.trim()}
-                    onClick={() => {
-                      const delivered = director.cueAll(cueText.trim())
+                    onClick={async () => {
+                      const delivered = await director.cueAll(cueText.trim())
                       setCueText('')
                       useStudioStore
                         .getState()
                         .showToast(
                           delivered > 0
                             ? `Cue sent to ${delivered} guest${delivered === 1 ? '' : 's'}.`
-                            : 'No guest has an open control channel, so the cue was not delivered.',
+                            : 'No guest is in the room, so the cue was not delivered.',
                           delivered > 0 ? 'success' : 'error',
                         )
                     }}
@@ -411,7 +418,14 @@ export function DirectorRoom({ room, webrtc }: DirectorRoomProps) {
                 )}
 
                 <div className="border-t border-deck-700 pt-3">
-                  <InvitePanel room={room} webrtc={webrtc} />
+                  <RoomInvitePanel
+                    room={room}
+                    serverUrl={serverUrl}
+                    snapshot={media.snapshot}
+                    supported={media.supported}
+                    guestLink={guestLink}
+                    producerLink={producerLink}
+                  />
                 </div>
               </section>
             ) : null}
@@ -474,7 +488,7 @@ function SceneOutputLink({
 }: {
   room: string
   roleLink: (role: 'scene', room: string) => string
-  onCopy: (text?: string) => Promise<boolean>
+  onCopy: (text: string) => Promise<boolean>
 }) {
   const url = roleLink('scene', room)
   const [copied, setCopied] = useState(false)

@@ -30,6 +30,8 @@ type GuestState = {
    * actually deliver.
    */
   controlStates: Record<string, ControlChannelState>
+  /** Keys for this room, once the director has them. Never persisted. */
+  roomKeys: { directorKey: string; producerKey: string } | null
 
   addGuest: (options: { name?: string; peerId?: string | null }) => Guest
   removeGuest: (guestId: string) => void
@@ -42,6 +44,7 @@ type GuestState = {
   setPeerStats: (peerId: string, stats: PeerStats) => void
   setControlState: (state: ControlChannelState) => void
   removePeer: (peerId: string) => void
+  setRoomKeys: (keys: { directorKey: string; producerKey: string } | null) => void
 
   hydrate: (guests: Guest[], order: string[]) => void
   clear: () => void
@@ -54,6 +57,7 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
   peerStates: {},
   peerStats: {},
   controlStates: {},
+  roomKeys: null,
 
   addGuest: ({ name, peerId }) => {
     const id = createGuestId()
@@ -153,6 +157,8 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
       return { peerStates, peerStats, controlStates }
     }),
 
+  setRoomKeys: (roomKeys) => set({ roomKeys }),
+
   hydrate: (guests, order) =>
     set(() => {
       const map: Record<string, Guest> = {}
@@ -173,9 +179,9 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
     }),
 
   clear: () =>
-    set({ guests: {}, order: [], peerStates: {}, peerStats: {}, controlStates: {} }),
+    set({ guests: {}, order: [], peerStates: {}, peerStats: {}, controlStates: {}, roomKeys: null }),
 
-  clearLive: () => set({ peerStates: {}, peerStats: {}, controlStates: {} }),
+  clearLive: () => set({ peerStates: {}, peerStats: {}, controlStates: {}, roomKeys: null }),
 }))
 
 /* ---------------------------------------------------------------- selectors */

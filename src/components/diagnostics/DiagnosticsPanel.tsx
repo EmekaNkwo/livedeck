@@ -136,10 +136,9 @@ export function DiagnosticsPanel() {
                   </p>
                 </div>
                 <Metric label="Status" value={peer.state.status} mono={false} />
-                <Metric label="connectionState" value={peer.state.connectionState ?? '—'} />
-                <Metric label="iceConnectionState" value={peer.state.iceConnectionState ?? '—'} />
-                <Metric label="iceGatheringState" value={peer.state.iceGatheringState ?? '—'} />
-                <Metric label="signalingState" value={peer.state.signalingState ?? '—'} />
+                <Metric label="Receive transport" value={peer.state.transport} />
+                <Metric label="Remote video" value={peer.state.hasRemoteVideo ? 'yes' : 'no'} mono={false} />
+                <Metric label="Remote audio" value={peer.state.hasRemoteAudio ? 'yes' : 'no'} mono={false} />
 
                 {/* getStats() output. Null fields stay dashes. */}
                 <Metric

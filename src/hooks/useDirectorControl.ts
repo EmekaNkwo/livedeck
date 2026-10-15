@@ -1,53 +1,42 @@
 import { useCallback } from 'react'
+import type { ControlAction } from '@shared/protocol'
+import { SignalingError } from '@/media/signaling-client'
+import { useMediaSessionStore } from '@/media/session-store'
 import type { ControlChannelState } from '@/types/room'
-import { peerManager } from '@/services/webrtc/peer-manager'
 import { useGuestStore } from '@/stores/guestStore'
 import { useStudioStore } from '@/stores/studioStore'
 
 /**
- * Director controls, as VDO.Ninja's control room has them.
+ * Director controls.
  *
  * TWO KINDS OF CONTROL, NEVER CONFLATED
  * -------------------------------------
- *  - **Remote** (`muteGuestMic`, `muteGuestCamera`, `cue`) travel over the data
- *    channel and change things on the *guest's* machine. They can fail — the
- *    channel may not be open — so each returns a boolean and the UI reports the
- *    failure instead of showing a state that never took effect.
- *  - **Local** (`setMutedInLocalMix`) only affect this machine's program mix.
- *    The guest is not told and keeps sending.
- *
- * A real VDO.Ninja director can do both; conflating them would mean telling an
- * operator they had silenced someone when they had only silenced their own
- * monitor.
+ *  - **Remote** (`muteGuestMic`, `muteGuestCamera`, `cue`, `setGuestLabel`,
+ *    `kick`) go through the server, which checks this session's role before
+ *    forwarding, and change things on the *guest's* machine. They can be
+ *    refused, so each resolves to a result the UI reports.
+ *  - **Local** mutes and hides affect only this machine's program mix. The
+ *    guest is not told and keeps sending. Those live in `useGuests`.
  */
 
 export type RemoteControlResult = {
   delivered: boolean
-  /** Why it did not reach the guest, when it did not. */
   reason: string | null
-}
-
-const NOT_CONNECTED: RemoteControlResult = {
-  delivered: false,
-  reason:
-    'The control channel to this guest is not open, so the command did not reach them. They may ' +
-    'still be connecting, or their connection may have dropped.',
 }
 
 const DELIVERED: RemoteControlResult = { delivered: true, reason: null }
 
 export type UseDirectorControl = {
-  /** Control-channel state for a guest's peer, or null if there is no peer. */
-  controlStateFor: (peerId: string | null) => ControlChannelState | null
-  canControlRemotely: (peerId: string | null) => boolean
-
-  muteGuestMic: (peerId: string | null, muted: boolean) => RemoteControlResult
-  muteGuestCamera: (peerId: string | null, muted: boolean) => RemoteControlResult
-  sendCue: (peerId: string | null, text: string) => RemoteControlResult
-  setGuestLabel: (peerId: string | null, label: string) => RemoteControlResult
-  /** Tell every connected guest whether they are live in the program output. */
-  broadcastOnAir: (onAir: boolean) => number
-  cueAll: (text: string) => number
+  controlStateFor: (participantId: string | null) => ControlChannelState | null
+  canControlRemotely: (participantId: string | null) => boolean
+  muteGuestMic: (participantId: string | null, muted: boolean) => Promise<RemoteControlResult>
+  muteGuestCamera: (participantId: string | null, muted: boolean) => Promise<RemoteControlResult>
+  sendCue: (participantId: string | null, text: string) => Promise<RemoteControlResult>
+  setGuestLabel: (participantId: string | null, label: string) => Promise<RemoteControlResult>
+  kick: (participantId: string | null) => Promise<RemoteControlResult>
+  /** Tell every participant whether they are live. Resolves to the delivered count. */
+  broadcastOnAir: (onAir: boolean) => Promise<number>
+  cueAll: (text: string) => Promise<number>
 }
 
 export function useDirectorControl(): UseDirectorControl {
@@ -55,79 +44,62 @@ export function useDirectorControl(): UseDirectorControl {
   const showToast = useStudioStore((state) => state.showToast)
 
   const controlStateFor = useCallback(
-    (peerId: string | null) => (peerId ? (controlStates[peerId] ?? null) : null),
+    (participantId: string | null) => (participantId ? (controlStates[participantId] ?? null) : null),
     [controlStates],
   )
 
   const canControlRemotely = useCallback(
-    (peerId: string | null) => Boolean(peerId && controlStates[peerId]?.open),
+    (participantId: string | null) => Boolean(participantId && controlStates[participantId]?.open),
     [controlStates],
   )
 
-  /** Shared delivery path, so every remote command reports failure the same way. */
   const deliver = useCallback(
-    (peerId: string | null, send: () => boolean): RemoteControlResult => {
-      if (!peerId) return NOT_CONNECTED
-      const ok = send()
-      if (!ok) {
-        showToast(NOT_CONNECTED.reason ?? 'The command could not be delivered.', 'error')
-        return NOT_CONNECTED
+    async (participantId: string | null, command: ControlAction): Promise<RemoteControlResult> => {
+      const session = useMediaSessionStore.getState().session
+      if (!participantId || !session) {
+        const reason = 'Not connected to the room, so the command did not reach the guest.'
+        showToast(reason, 'error')
+        return { delivered: false, reason }
       }
-      return DELIVERED
+      try {
+        await session.control(participantId, command)
+        return DELIVERED
+      } catch (error) {
+        const reason =
+          error instanceof SignalingError && error.code === 'forbidden'
+            ? 'The server refused this command: your role may not control that participant.'
+            : error instanceof Error
+              ? error.message
+              : 'The command could not be delivered.'
+        showToast(reason, 'error')
+        return { delivered: false, reason }
+      }
     },
     [showToast],
   )
 
-  const muteGuestMic = useCallback(
-    (peerId: string | null, muted: boolean) =>
-      deliver(peerId, () =>
-        peerManager.sendControl(peerId as string, { v: 1, type: 'mute-mic', muted }),
-      ),
-    [deliver],
-  )
-
-  const muteGuestCamera = useCallback(
-    (peerId: string | null, muted: boolean) =>
-      deliver(peerId, () =>
-        peerManager.sendControl(peerId as string, { v: 1, type: 'mute-camera', muted }),
-      ),
-    [deliver],
-  )
-
-  const sendCue = useCallback(
-    (peerId: string | null, text: string) =>
-      deliver(peerId, () =>
-        peerManager.sendControl(peerId as string, { v: 1, type: 'cue', text }),
-      ),
-    [deliver],
-  )
-
-  const setGuestLabel = useCallback(
-    (peerId: string | null, label: string) =>
-      deliver(peerId, () =>
-        peerManager.sendControl(peerId as string, { v: 1, type: 'label', label }),
-      ),
-    [deliver],
-  )
-
-  const broadcastOnAir = useCallback(
-    (onAir: boolean) => peerManager.broadcastControl({ v: 1, type: 'on-air', onAir }),
-    [],
-  )
-
-  const cueAll = useCallback(
-    (text: string) => peerManager.broadcastControl({ v: 1, type: 'cue', text }),
+  const broadcast = useCallback(
+    async (command: ControlAction): Promise<number> => {
+      const session = useMediaSessionStore.getState().session
+      if (!session) return 0
+      const targets = session.current.participants.filter((p) => p.role !== 'director')
+      const results = await Promise.all(
+        targets.map((p) => session.control(p.id, command).then(() => true, () => false)),
+      )
+      return results.filter(Boolean).length
+    },
     [],
   )
 
   return {
     controlStateFor,
     canControlRemotely,
-    muteGuestMic,
-    muteGuestCamera,
-    sendCue,
-    setGuestLabel,
-    broadcastOnAir,
-    cueAll,
+    muteGuestMic: useCallback((id, muted) => deliver(id, { action: 'mute-mic', muted }), [deliver]),
+    muteGuestCamera: useCallback((id, muted) => deliver(id, { action: 'mute-camera', muted }), [deliver]),
+    sendCue: useCallback((id, text) => deliver(id, { action: 'cue', text }), [deliver]),
+    setGuestLabel: useCallback((id, label) => deliver(id, { action: 'label', label }), [deliver]),
+    kick: useCallback((id) => deliver(id, { action: 'kick' }), [deliver]),
+    broadcastOnAir: useCallback((onAir) => broadcast({ action: 'on-air', onAir }), [broadcast]),
+    cueAll: useCallback((text) => broadcast({ action: 'cue', text }), [broadcast]),
   }
 }

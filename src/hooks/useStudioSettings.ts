@@ -40,7 +40,6 @@ export type UseStudioSettings = {
   setShowSafeAreas: (enabled: boolean) => void
   setReducedMotion: (mode: StudioSettings['reducedMotion']) => void
   setIceServerUrls: (urls: string[]) => void
-  setSignalingTransport: (transport: StudioSettings['signalingTransport']) => void
   setSignalingServerUrl: (url: string) => void
   /** `null` when the current transport configuration is usable. */
   signalingConfigError: string | null
@@ -58,7 +57,6 @@ export type UseStudioSettings = {
  * what gets validated, since that is what will actually be dialled.
  */
 function validateSignalingConfig(settings: StudioSettings): string | null {
-  if (settings.signalingTransport !== 'server') return null
 
   const raw = resolveRelayUrl(settings.signalingServerUrl)
   if (!raw) return 'Enter the address of your signaling server.'
@@ -96,7 +94,6 @@ export function useStudioSettings(): UseStudioSettings {
   const setShowSafeAreas = useSettingsStore((state) => state.setShowSafeAreas)
   const setReducedMotion = useSettingsStore((state) => state.setReducedMotion)
   const setIceServerUrls = useSettingsStore((state) => state.setIceServerUrls)
-  const setSignalingTransport = useSettingsStore((state) => state.setSignalingTransport)
   const setSignalingServerUrl = useSettingsStore((state) => state.setSignalingServerUrl)
   const reset = useSettingsStore((state) => state.reset)
 
@@ -208,7 +205,6 @@ export function useStudioSettings(): UseStudioSettings {
     setShowSafeAreas,
     setReducedMotion,
     setIceServerUrls,
-    setSignalingTransport,
     setSignalingServerUrl,
     signalingConfigError,
     reset,

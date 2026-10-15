@@ -1,0 +1,121 @@
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import type { ControlAction, IceServer, MediaSource } from '@shared/protocol'
+import { MediaSession } from '@/media/media-session'
+import { useMediaSessionStore } from '@/media/session-store'
+import type { JoinOptions, SessionSnapshot } from '@/media/types'
+import { parseIceServerUrls } from '@/services/signaling/ice-servers'
+import { resolveRelayUrl } from '@/services/signaling/relay-url'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { useStudioStore } from '@/stores/studioStore'
+
+/**
+ * Own one {@link MediaSession} for as long as `join` is set.
+ *
+ * Setting `join` starts the session; clearing it, or changing the room,
+ * leaves and starts over. Everything else about the session (label changes,
+ * publishing) happens through the returned methods rather than through
+ * re-renders, so an inline options object cannot restart a live call.
+ */
+
+export type UseMediaSessionOptions = {
+  /** Null keeps the session stopped. */
+  join: JoinOptions | null
+}
+
+export type UseMediaSession = {
+  snapshot: SessionSnapshot
+  supported: boolean
+  produce: (source: MediaSource, track: MediaStreamTrack) => Promise<void>
+  closeProducer: (source: MediaSource) => Promise<void>
+  pauseProducer: (source: MediaSource, paused: boolean) => Promise<void>
+  updateState: (state: { micMuted?: boolean; cameraMuted?: boolean; sharing?: boolean }) => Promise<void>
+  control: (target: string, command: ControlAction) => Promise<void>
+  getRoomKeys: () => Promise<{ directorKey: string; producerKey: string } | null>
+  leave: () => void
+}
+
+export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSession {
+  const serverUrl = useSettingsStore((state) => state.settings.signalingServerUrl)
+  const iceServerUrls = useSettingsStore((state) => state.settings.iceServerUrls)
+  const showToast = useStudioStore((state) => state.showToast)
+  const snapshot = useMediaSessionStore((state) => state.snapshot)
+  const attach = useMediaSessionStore((state) => state.attach)
+  const sessionRef = useRef<MediaSession | null>(null)
+
+  const extraIceServers = useMemo<IceServer[]>(() => parseIceServerUrls(iceServerUrls), [iceServerUrls])
+  const extraIceServersRef = useRef(extraIceServers)
+  extraIceServersRef.current = extraIceServers
+  const showToastRef = useRef(showToast)
+  showToastRef.current = showToast
+
+  // Identity of the join: these are what warrant a new session.
+  const room = join?.room ?? null
+  const label = join?.label ?? ''
+  const key = join?.key
+  const role = join?.role
+  const claim = join?.claim ?? false
+  const url = resolveRelayUrl(serverUrl)
+
+  useEffect(() => {
+    if (!room) return
+    const session = new MediaSession({ url, extraIceServers: extraIceServersRef.current })
+    sessionRef.current = session
+    const detach = attach(session)
+    const offError = session.on('error', (message) => showToastRef.current(message, 'error'))
+    void session.start({ room, label, key, role, claim }).catch(() => {
+      // Reported through the error event and the snapshot's `error`.
+    })
+    return () => {
+      offError()
+      session.leave()
+      detach()
+      if (sessionRef.current === session) sessionRef.current = null
+    }
+  }, [attach, claim, key, label, role, room, url])
+
+  const produce = useCallback(
+    (source: MediaSource, track: MediaStreamTrack) => sessionRef.current?.produce(source, track) ?? Promise.resolve(),
+    [],
+  )
+  const closeProducer = useCallback(
+    (source: MediaSource) => sessionRef.current?.closeProducer(source) ?? Promise.resolve(),
+    [],
+  )
+  const pauseProducer = useCallback(
+    (source: MediaSource, paused: boolean) => sessionRef.current?.pauseProducer(source, paused) ?? Promise.resolve(),
+    [],
+  )
+  const updateState = useCallback(
+    (state: { micMuted?: boolean; cameraMuted?: boolean; sharing?: boolean }) =>
+      sessionRef.current?.updateState(state) ?? Promise.resolve(),
+    [],
+  )
+  const control = useCallback(
+    (target: string, command: ControlAction) => {
+      const session = sessionRef.current
+      if (!session) return Promise.reject(new Error('Not in a room.'))
+      return session.control(target, command)
+    },
+    [],
+  )
+  const getRoomKeys = useCallback(async () => {
+    try {
+      return (await sessionRef.current?.getRoomKeys()) ?? null
+    } catch {
+      return null
+    }
+  }, [])
+  const leave = useCallback(() => sessionRef.current?.leave(), [])
+
+  return {
+    snapshot,
+    supported: MediaSession.isSupported(),
+    produce,
+    closeProducer,
+    pauseProducer,
+    updateState,
+    control,
+    getRoomKeys,
+    leave,
+  }
+}

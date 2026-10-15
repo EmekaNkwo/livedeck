@@ -1,25 +1,20 @@
 /**
- * Rooms and roles — the VDO.Ninja mental model.
+ * Rooms and roles.
  *
- * VDO.Ninja has no notion of a "project file". Instead everything is a URL with
- * a role baked into it:
+ * Everything is a URL with a role baked into it:
  *
  *   /director/:room        the control room — see every guest, mix, record
  *   /push/:room            a guest's camera sender
  *   /scene/:room           a clean program output, meant to be screen-captured
- *   /solo/:room/:guestId   one guest's feed, clean
+ *   /solo/:room/:sourceId  one feed, clean
  *
  * The role decides what the page *is*, not just what it shows. A push view has
  * no mixer and no recorder; a scene view has no interface at all.
  *
- * IMPORTANT HONESTY NOTE
- * ----------------------
- * In real VDO.Ninja, a room name is enough to connect because a signaling
- * server matches peers inside it. This project has **no backend**, so a room
- * name alone cannot connect anybody. Rooms here group the local production and
- * label the roles; the actual connection is still established by exchanging an
- * invite link that carries the session description. See
- * `services/signaling/invite-link.ts`.
+ * A room name groups participants on the media server. It is not a password:
+ * anyone who reaches the server joins as a guest. The director and producer
+ * roles are granted by room keys the server issues — see
+ * `shared/authorization.ts`.
  */
 
 export type RoomRole = 'director' | 'push' | 'scene' | 'solo'
@@ -41,125 +36,20 @@ export const ROLE_DESCRIPTION: Record<RoomRole, string> = {
 }
 
 /**
- * Director → guest control messages, sent over the peer connection's data
- * channel.
- *
- * This is what makes director controls *real* rather than local-only: muting a
- * guest from the control room disables the track on **their** machine, exactly
- * as VDO.Ninja's director does. Without a data channel the best a director
- * could do is drop the guest from its own mix, which the remote participant
- * would never know about.
+ * What the control room knows about a participant's remote-control path and
+ * their self-reported state. Never persisted.
  */
-export type ControlMessage =
-  | { v: 1; type: 'mute-mic'; muted: boolean }
-  | { v: 1; type: 'mute-camera'; muted: boolean }
-  /** Ask the guest to display a short message (a cue, a countdown). */
-  | { v: 1; type: 'cue'; text: string }
-  /** Tell the guest whether they are currently live in the program output. */
-  | { v: 1; type: 'on-air'; onAir: boolean }
-  /** Rename request — the director renamed them in the control room. */
-  | { v: 1; type: 'label'; label: string }
-  /** Keepalive, so a stalled data channel is detectable. */
-  | { v: 1; type: 'ping'; at: number }
-
-/** Guest → director acknowledgements and state reports. */
-export type GuestMessage =
-  | { v: 1; type: 'hello'; label: string; hasVideo: boolean; hasAudio: boolean }
-  /** The guest's *actual* track state after applying a control message. */
-  | { v: 1; type: 'state'; micMuted: boolean; cameraMuted: boolean }
-  | { v: 1; type: 'pong'; at: number }
-  /**
-   * This participant started or stopped sharing a screen.
-   *
-   * Needed because a screen share arrives as an ordinary video track — there
-   * is nothing in WebRTC that says what a track is *of*. Without being told,
-   * the receiving side cannot know to give it more of the layout, and a shared
-   * document would be rendered at the size of a face.
-   */
-  | { v: 1; type: 'sharing'; sharing: boolean }
-
-export type AnyChannelMessage = ControlMessage | GuestMessage
-
-/** Live state of a guest's control channel. Never persisted. */
 export type ControlChannelState = {
   peerId: string
+  /** True when commands can reach this participant through the server. */
   open: boolean
-  /** Round-trip of the last ping, or null if never measured. */
   latencyMs: number | null
-  /** What the guest last reported about its own tracks. */
+  /** What the participant last reported about its own tracks. */
   reportedMicMuted: boolean | null
   reportedCameraMuted: boolean | null
+  sharing: boolean
+  onAir: boolean
   lastMessageAt: number | null
-}
-
-/**
- * Validate a message arriving over the data channel.
- *
- * Data-channel payloads are remote input and are not trustworthy: a peer could
- * send anything. Everything is structurally checked before it can touch local
- * state or a MediaStreamTrack.
- */
-export function parseChannelMessage(raw: string): AnyChannelMessage | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return null
-  }
-  if (typeof parsed !== 'object' || parsed === null) return null
-
-  const message = parsed as Record<string, unknown>
-  if (message.v !== 1 || typeof message.type !== 'string') return null
-
-  switch (message.type) {
-    case 'mute-mic':
-    case 'mute-camera':
-      return typeof message.muted === 'boolean'
-        ? ({ v: 1, type: message.type, muted: message.muted } as ControlMessage)
-        : null
-    case 'cue':
-      // Bounded so a hostile peer cannot push an unbounded string into the DOM.
-      return typeof message.text === 'string'
-        ? { v: 1, type: 'cue', text: message.text.slice(0, 280) }
-        : null
-    case 'on-air':
-      return typeof message.onAir === 'boolean'
-        ? { v: 1, type: 'on-air', onAir: message.onAir }
-        : null
-    case 'label':
-      return typeof message.label === 'string'
-        ? { v: 1, type: 'label', label: message.label.slice(0, 60) }
-        : null
-    case 'ping':
-      return typeof message.at === 'number' ? { v: 1, type: 'ping', at: message.at } : null
-    case 'pong':
-      return typeof message.at === 'number' ? { v: 1, type: 'pong', at: message.at } : null
-    case 'hello':
-      return typeof message.label === 'string' &&
-        typeof message.hasVideo === 'boolean' &&
-        typeof message.hasAudio === 'boolean'
-        ? {
-            v: 1,
-            type: 'hello',
-            label: message.label.slice(0, 60),
-            hasVideo: message.hasVideo,
-            hasAudio: message.hasAudio,
-          }
-        : null
-    case 'state':
-      return typeof message.micMuted === 'boolean' && typeof message.cameraMuted === 'boolean'
-        ? { v: 1, type: 'state', micMuted: message.micMuted, cameraMuted: message.cameraMuted }
-        : null
-    case 'sharing':
-      // Strict, like every other case here: `sharing: "true"` is rejected
-      // rather than coerced. This is remote input from a peer that can send
-      // anything, and it drives layout.
-      return typeof message.sharing === 'boolean'
-        ? { v: 1, type: 'sharing', sharing: message.sharing }
-        : null
-    default:
-      return null
-  }
 }
 
 /** Room names are user-visible and go in URLs, so they are normalized. */

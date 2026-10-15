@@ -114,7 +114,11 @@ const join: Handler<'join'> = async (ctx, params) => {
   }
 
   const keyRole = ctx.keys.roleForKey(params.room, params.key)
-  const role: Role = keyRole ?? params.role ?? 'guest'
+  // A claim only works on an empty room: the first studio in owns it. With
+  // people already inside, the director key is the only way to the role.
+  const claimed = params.claim === true && keyRole === null && room.isEmpty ? 'director' : null
+  const role: Role = keyRole ?? claimed ?? params.role ?? 'guest'
+  if (claimed) ctx.log('room-claimed', { room: room.name })
   const peer = new Peer({
     id: randomUUID(),
     role,

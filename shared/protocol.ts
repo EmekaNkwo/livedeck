@@ -153,6 +153,14 @@ export const RequestSchemas = {
     /** Without a key, a client may ask for a lesser role than guest. */
     role: RequestableRoleSchema.optional(),
     /**
+     * Claim an empty room as its director.
+     *
+     * There are no accounts, so the first studio to open a room that nobody
+     * is in becomes its director and is handed the room keys. Once a room has
+     * participants, only a key grants the role.
+     */
+    claim: z.boolean().optional(),
+    /**
      * Resume a previous session after a dropped socket. The server reclaims
      * the same participant and its transports if they are still alive.
      */

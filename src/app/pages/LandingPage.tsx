@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom'
 import { normalizeRoomName } from '@/types/room'
 import { findCapabilityGaps } from '@/lib/capabilities'
 import { listSessions } from '@/services/persistence/document-store'
-import { useSettingsStore } from '@/stores/settingsStore'
 import { createRoomCode } from '@/utils/id'
 import { useStudioSession } from '@/hooks/useStudioSession'
 import { formatRelativeTime } from '@/utils/format'
@@ -31,16 +30,6 @@ export function LandingPage() {
   const [room, setRoom] = useState('')
   const [showParams, setShowParams] = useState(false)
 
-  /*
-   * Which invitation workflow the operator will actually get.
-   *
-   * Read here rather than from the live transport because this page has no peer
-   * connection — it is describing what the director view will do, not reporting
-   * a socket's state.
-   */
-  const roomsSupported = useSettingsStore(
-    (state) => state.settings.signalingTransport === 'server',
-  )
 
   const gaps = findCapabilityGaps()
   const blocking = gaps.filter((gap) => gap.blocking)
@@ -110,20 +99,11 @@ export function LandingPage() {
             </code>
           </div>
 
-          {roomsSupported ? (
-            <Notice>
-              Open the director view, copy the room link, and send it. Guests who open it set a name
-              and join — there is nothing to paste back. Signaling runs through the relay
-              configured in Settings; media still goes directly between browsers.
-            </Notice>
-          ) : (
-            <Notice>
-              Signaling is set to <strong className="text-ink-200">Manual</strong>, so a room name
-              on its own cannot connect anyone — guests join by opening an invite link that carries
-              the connection details, and their reply comes back by hand. Switch to a signaling
-              server in Settings for one reusable room link.
-            </Notice>
-          )}
+          <Notice>
+            Open the director view, copy the room link, and send it. Guests who open it set a name
+            and join — there is nothing to paste back. Audio and video go through the media server
+            configured in Settings, which also decides who may control whom.
+          </Notice>
         </section>
 
         {/* -------------------------------------------------------- roles */}

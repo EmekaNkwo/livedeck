@@ -5,7 +5,7 @@ import { createSessionId } from '@/utils/id'
 import { streamRegistry } from '@/services/media/stream-registry'
 import { audioMixer } from '@/services/audio/audio-mixer'
 import { recordingEngine } from '@/services/recording/recording-engine'
-import { peerManager } from '@/services/webrtc/peer-manager'
+import { useMediaSessionStore } from '@/media/session-store'
 import { assetCache } from '@/services/composition/asset-cache'
 import { compositor } from '@/services/composition/compositor'
 import { meterBus } from '@/services/audio/meter-bus'
@@ -200,7 +200,7 @@ export function useStudioSession(): UseStudioSession {
       // Switching out of peer mode closes live connections — they are
       // meaningless in Local Studio Mode and leaving them open would be a leak.
       if (mode === 'local') {
-        peerManager.closeAll()
+        useMediaSessionStore.getState().session?.leave()
         useGuestStore.getState().clearLive()
       }
       refreshSessions()
@@ -230,7 +230,7 @@ export function useStudioSession(): UseStudioSession {
   const releaseSessionResources = useCallback(() => {
     compositor.stop()
     recordingEngine.dispose()
-    peerManager.closeAll()
+    useMediaSessionStore.getState().session?.leave()
     streamRegistry.disposeAll()
     assetCache.releaseAll()
     meterBus.clear()

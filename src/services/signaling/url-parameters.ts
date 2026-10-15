@@ -36,6 +36,8 @@ export type ParsedUrlParameters = {
   autoStart: boolean
   /** Index of the scene to show on load (scene views). */
   scene: number | null
+  /** A room key, granting the director or producer role on join. */
+  key: string | null
   /** Keys present in the URL that this build does not understand. */
   unknown: string[]
 }
@@ -52,6 +54,7 @@ export const DEFAULT_URL_PARAMETERS: ParsedUrlParameters = {
   mirror: false,
   autoStart: false,
   scene: null,
+  key: null,
   unknown: [],
 }
 
@@ -135,6 +138,13 @@ export const PARAMETER_DOCS: ParameterDoc[] = [
     description: 'Which scene to show on load, by position in the scene list (0-based).',
     roles: 'scene',
   },
+  {
+    keys: ['key'],
+    value: 'text',
+    description:
+      'A room key issued by the server. The producer key grants guest control; the director key grants the control room.',
+    roles: 'guest, director',
+  },
 ]
 
 /** Every key the parser accepts, for unknown-key detection. */
@@ -212,6 +222,13 @@ function readScene(params: URLSearchParams): number | null {
   return Number.isInteger(value) && value >= 0 ? value : null
 }
 
+function readKey(params: URLSearchParams): string | null {
+  const raw = params.get('key')
+  if (raw === null) return null
+  const value = raw.trim()
+  return value && value.length <= 128 ? value : null
+}
+
 /** Parse a query string into resolved parameters. */
 export function parseUrlParameters(search: string): ParsedUrlParameters {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
@@ -233,6 +250,7 @@ export function parseUrlParameters(search: string): ParsedUrlParameters {
     mirror: readFlag(params, 'mirror'),
     autoStart: readFlag(params, 'autostart', 'autojoin'),
     scene: readScene(params),
+    key: readKey(params),
     // De-duplicated so a repeated key is reported once.
     unknown: [...new Set(unknown)],
   }
@@ -246,9 +264,11 @@ export function buildParameterQuery(options: {
   noAudio?: boolean
   quality?: OutputResolutionId | null
   fps?: FrameRateId | null
+  key?: string | null
 }): Record<string, string> {
   const query: Record<string, string> = {}
   if (options.label) query.label = options.label
+  if (options.key) query.key = options.key
   // Bare flags, matching the convention people are used to reading.
   if (options.startMuted) query.muted = ''
   if (options.noVideo) query.novideo = ''

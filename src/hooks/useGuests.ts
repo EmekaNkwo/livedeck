@@ -1,8 +1,8 @@
 import { useCallback, useMemo } from 'react'
 import type { Guest, PeerState, PeerStats } from '@/types/peer'
 import { streamRegistry } from '@/services/media/stream-registry'
-import { peerManager } from '@/services/webrtc/peer-manager'
 import { streamKeys } from '@/services/sources/source-factory'
+import { useMediaSessionStore } from '@/media/session-store'
 import { useGuestStore } from '@/stores/guestStore'
 import { useSceneStore } from '@/stores/sceneStore'
 import { useSourceStore } from '@/stores/sourceStore'
@@ -26,10 +26,13 @@ export type GuestView = {
   guest: Guest
   peer: PeerState | null
   stats: PeerStats | null
-  /** Live stream backing this guest, if any. */
+  /** Live camera/microphone stream backing this guest, if any. */
   stream: MediaStream | null
+  /** The guest's shared screen, if they are sharing one. */
+  screenStream: MediaStream | null
   videoSourceId: string | null
   audioSourceId: string | null
+  screenSourceId: string | null
   /** Honest one-line status for the UI. */
   statusLabel: string
   connected: boolean
@@ -44,8 +47,13 @@ export type UseGuests = {
   setMutedInMix: (guestId: string, muted: boolean) => void
   setVideoHidden: (guestId: string, hidden: boolean) => void
   /** Attach an incoming remote stream to a guest's sources. */
-  attachStream: (guestId: string, stream: MediaStream) => void
-  detachStream: (guestId: string) => void
+  attachStream: (guestId: string, stream: MediaStream, options?: AttachOptions) => void
+  detachStream: (guestId: string, options?: AttachOptions) => void
+}
+
+export type AttachOptions = {
+  /** The stream is a shared screen, not the guest's face. */
+  screen?: boolean
 }
 
 export function useGuests(): UseGuests {
@@ -79,16 +87,15 @@ export function useGuests(): UseGuests {
    * guest appeared twice in the scene.
    */
   const findGuestSources = useCallback(
-    (guestId: string) => {
+    (guestId: string, screen = false) => {
       let videoSourceId: string | null = null
       let audioSourceId: string | null = null
       for (const source of Object.values(useSourceStore.getState().sources)) {
-        if (source.settings.kind === 'remote-video' && source.settings.guestId === guestId) {
-          videoSourceId = source.id
-        }
-        if (source.settings.kind === 'remote-audio' && source.settings.guestId === guestId) {
-          audioSourceId = source.id
-        }
+        const settings = source.settings
+        if (settings.kind !== 'remote-video' && settings.kind !== 'remote-audio') continue
+        if (settings.guestId !== guestId || Boolean(settings.screen) !== screen) continue
+        if (settings.kind === 'remote-video') videoSourceId = source.id
+        else audioSourceId = source.id
       }
       return { videoSourceId, audioSourceId }
     },
@@ -104,14 +111,16 @@ export function useGuests(): UseGuests {
    * removing one does not stop the other.
    */
   const attachStream = useCallback(
-    (guestId: string, stream: MediaStream) => {
+    (guestId: string, stream: MediaStream, options?: AttachOptions) => {
       const guest = useGuestStore.getState().guests[guestId]
       if (!guest) return
-      const key = streamKeys.guest(guestId)
+      const screen = options?.screen ?? false
+      const key = screen ? streamKeys.guestScreen(guestId) : streamKeys.guest(guestId)
+      const suffix = screen ? 'screen' : 'video'
 
-      streamRegistry.register(key, stream)
+      if (streamRegistry.getStream(key) !== stream) streamRegistry.register(key, stream)
 
-      const existing = findGuestSources(guestId)
+      const existing = findGuestSources(guestId, screen)
       const hasVideo = stream.getVideoTracks().length > 0
       const hasAudio = stream.getAudioTracks().length > 0
 
@@ -120,41 +129,50 @@ export function useGuests(): UseGuests {
           replaceStream(existing.videoSourceId, key)
         } else {
           addSource({
-            name: `${guest.name} video`,
+            name: `${guest.name} ${suffix}`,
             type: 'remote-video',
             streamKey: key,
-            settings: { kind: 'remote-video', guestId },
+            settings: { kind: 'remote-video', guestId, ...(screen ? { screen: true } : {}) },
             addToMixer: false,
+            // A shared screen is placed by the operator, not automatically.
+            ...(screen ? { addToScene: false } : {}),
           })
           // The video source registered the key; the audio source below takes
           // its own reference.
         }
+      } else if (existing.videoSourceId) {
+        removeSource(existing.videoSourceId)
       }
 
       if (hasAudio) {
         if (existing.audioSourceId) {
           replaceStream(existing.audioSourceId, key)
         } else {
-          if (hasVideo) streamRegistry.retain(key)
+          if (hasVideo || existing.videoSourceId) streamRegistry.retain(key)
           addSource({
-            name: `${guest.name} audio`,
+            name: `${guest.name} ${screen ? 'screen audio' : 'audio'}`,
             type: 'remote-audio',
             streamKey: key,
-            settings: { kind: 'remote-audio', guestId },
+            settings: { kind: 'remote-audio', guestId, ...(screen ? { screen: true } : {}) },
             mixerKind: 'guest',
             addToScene: false,
           })
         }
+      } else if (existing.audioSourceId) {
+        removeSource(existing.audioSourceId)
       }
     },
-    [addSource, findGuestSources, replaceStream],
+    [addSource, findGuestSources, removeSource, replaceStream],
   )
 
   const detachStream = useCallback(
-    (guestId: string) => {
-      const { videoSourceId, audioSourceId } = findGuestSources(guestId)
-      if (videoSourceId) removeSource(videoSourceId)
-      if (audioSourceId) removeSource(audioSourceId)
+    (guestId: string, options?: AttachOptions) => {
+      const screens = options ? [options.screen ?? false] : [false, true]
+      for (const screen of screens) {
+        const { videoSourceId, audioSourceId } = findGuestSources(guestId, screen)
+        if (videoSourceId) removeSource(videoSourceId)
+        if (audioSourceId) removeSource(audioSourceId)
+      }
     },
     [findGuestSources, removeSource],
   )
@@ -165,22 +183,17 @@ export function useGuests(): UseGuests {
   )
 
   /**
-   * Remove a guest and release everything it owns.
+   * Remove a guest row and release the sources it owns.
    *
-   * Closing the peer connection is essential and easy to miss: dropping the
-   * guest row alone would leave a live RTCPeerConnection — and its ICE agent,
-   * transports and stats timer — running with nothing referencing it.
-   * `peerManager` is a plain service, so this does not create a dependency on
-   * `useWebRTC`.
+   * The media itself belongs to the session's consumers, which the session
+   * closes when the participant leaves or is kicked; this only drops the
+   * production model's view of them.
    */
   const removeGuest = useCallback(
     (guestId: string) => {
       const guest = useGuestStore.getState().guests[guestId]
       detachStream(guestId)
-      if (guest?.peerId) {
-        peerManager.closePeer(guest.peerId)
-        removePeer(guest.peerId)
-      }
+      if (guest?.peerId) removePeer(guest.peerId)
       removeGuestFromStore(guestId)
     },
     [detachStream, removeGuestFromStore, removePeer],
@@ -193,10 +206,16 @@ export function useGuests(): UseGuests {
       requestConfirm({
         title: `Remove ${guest.name}?`,
         message:
-          'The peer connection will be closed and this guest’s sources removed from every scene.',
+          'This guest will be removed from the room and their sources taken out of every scene.',
         confirmLabel: 'Remove guest',
         destructive: true,
-        onConfirm: () => removeGuest(guestId),
+        onConfirm: () => {
+          const session = useMediaSessionStore.getState().session
+          if (guest.peerId && session) {
+            void session.control(guest.peerId, { action: 'kick' }).catch(() => undefined)
+          }
+          removeGuest(guestId)
+        },
       })
     },
     [removeGuest, requestConfirm],
@@ -241,16 +260,19 @@ export function useGuests(): UseGuests {
       .map((guest) => {
         const peer = guest.peerId ? (peerStates[guest.peerId] ?? null) : null
         const stats = guest.peerId ? (peerStats[guest.peerId] ?? null) : null
-        const key = streamKeys.guest(guest.id)
-        const stream = streamRegistry.getStream(key)
+        const stream = streamRegistry.getStream(streamKeys.guest(guest.id))
+        const screenStream = streamRegistry.getStream(streamKeys.guestScreen(guest.id))
 
         let videoSourceId: string | null = null
         let audioSourceId: string | null = null
+        let screenSourceId: string | null = null
         for (const source of Object.values(sources)) {
-          if (source.settings.kind === 'remote-video' && source.settings.guestId === guest.id) {
-            videoSourceId = source.id
+          const settings = source.settings
+          if (settings.kind === 'remote-video' && settings.guestId === guest.id) {
+            if (settings.screen) screenSourceId = source.id
+            else videoSourceId = source.id
           }
-          if (source.settings.kind === 'remote-audio' && source.settings.guestId === guest.id) {
+          if (settings.kind === 'remote-audio' && settings.guestId === guest.id && !settings.screen) {
             audioSourceId = source.id
           }
         }
@@ -260,8 +282,10 @@ export function useGuests(): UseGuests {
           peer,
           stats,
           stream,
+          screenStream,
           videoSourceId,
           audioSourceId,
+          screenSourceId,
           statusLabel: describeGuestStatus(peer),
           // Only a real peer in the connected state counts as connected.
           connected: peer?.status === 'connected',
@@ -290,24 +314,18 @@ export function useGuests(): UseGuests {
  * already underway.
  */
 function describeGuestStatus(peer: PeerState | null): string {
-  if (!peer) return 'No connection — awaiting signaling'
+  if (!peer) return 'Not in the room'
   switch (peer.status) {
     case 'connected':
-      return 'Connected'
+      return peer.hasRemoteVideo || peer.hasRemoteAudio ? 'Connected' : 'In the room — no media yet'
     case 'connecting':
-      return 'Connecting — running connectivity checks'
-    case 'waiting-for-offer':
-      return 'Waiting for the host’s offer'
-    case 'waiting-for-answer':
-      return 'Waiting for this guest’s answer'
+      return 'Connecting to the media server'
     case 'reconnecting':
-      return 'Connection interrupted — attempting to recover'
+      return 'Connection interrupted — recovering'
     case 'failed':
       return peer.error ?? 'Connection failed'
     case 'closed':
       return 'Disconnected'
-    case 'initializing':
-      return 'Preparing connection'
   }
 }
 

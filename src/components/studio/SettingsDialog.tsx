@@ -1,7 +1,6 @@
 import type { AspectRatioId, FrameRateId, OutputResolutionId } from '@/types/scene'
 import { useStudioSettings } from '@/hooks/useStudioSettings'
 import { useStudioStore } from '@/stores/studioStore'
-import { DEFAULT_STUN_URLS } from '@/services/webrtc/ice'
 import { resolveRelayUrl } from '@/services/signaling/relay-url'
 import { Button } from '@/components/shared/Button'
 import { Dialog } from '@/components/shared/Dialog'
@@ -148,53 +147,29 @@ export function SettingsDialog() {
         </section>
 
         <section className="flex flex-col gap-3 border-t border-deck-700 pt-4">
-          <h3 className="text-xs font-semibold text-ink-100">Signaling</h3>
-          <SelectField
-            label="How peers exchange connection details"
-            value={settings.settings.signalingTransport}
-            options={[
-              { value: 'server', label: 'Signaling server — guests join by room link' },
-              { value: 'manual', label: 'Manual — copy an invite link (no server)' },
-            ]}
-            onChange={(value) =>
-              settings.setSignalingTransport(value as 'manual' | 'server')
-            }
+          <h3 className="text-xs font-semibold text-ink-100">Media server</h3>
+          <TextField
+            label="Server address"
+            hint={`Leave blank to use ${resolveRelayUrl('')} — the server in this repo. Override for one hosted elsewhere.`}
+            value={settings.settings.signalingServerUrl}
+            onChange={settings.setSignalingServerUrl}
           />
-
-          {settings.settings.signalingTransport === 'manual' ? (
-            <Notice>
-              Nothing is sent to any server. The offer travels inside the fragment of the invite
-              link, which browsers never transmit — you carry it yourself over whatever chat you
-              already trust. Media still flows peer-to-peer either way; this choice only affects how
-              the two sides find each other.
-            </Notice>
-          ) : (
-            <>
-              <TextField
-                label="Server address"
-                hint={`Leave blank to use ${resolveRelayUrl('')} — the bundled server in this repo. Override for a relay hosted elsewhere.`}
-                value={settings.settings.signalingServerUrl}
-                onChange={settings.setSignalingServerUrl}
-              />
-              {settings.signalingConfigError ? (
-                <Notice tone="warning">{settings.signalingConfigError}</Notice>
-              ) : null}
-              <Notice tone="warning">
-                This mode requires the relay in <code className="url-box">server/</code> to be
-                running — <code className="url-box">cd server && npm run dev</code>. It relays only
-                signaling text, never your media. Be aware that a room name is{' '}
-                <strong className="text-ink-200">not a password</strong>: anyone who reaches your
-                server and guesses the name joins the room.
-              </Notice>
-            </>
-          )}
+          {settings.signalingConfigError ? (
+            <Notice tone="warning">{settings.signalingConfigError}</Notice>
+          ) : null}
+          <Notice>
+            Every participant&apos;s audio and video is routed through this server (an SFU), which
+            is what lets a room hold a dozen people without each of them sending to everyone else.
+            Roles are decided by the server from the key in a link: a room name alone grants the
+            guest role and nothing more.
+          </Notice>
         </section>
 
         <section className="flex flex-col gap-3 border-t border-deck-700 pt-4">
           <h3 className="text-xs font-semibold text-ink-100">ICE servers</h3>
           <TextField
             label="STUN / TURN URLs"
-            hint="One per line. For TURN, append credentials as turn:host:port|username:password."
+            hint="Optional extras, one per line, merged after the servers the media server issues. For TURN, append credentials as turn:host:port|username:password."
             value={settings.settings.iceServerUrls.join('\n')}
             onChange={(value) =>
               settings.setIceServerUrls(
@@ -206,19 +181,17 @@ export function SettingsDialog() {
             }
           />
           <Notice>
-            STUN discovers your public address, which is enough for most home and office networks.
-            It does <strong className="text-ink-200">not</strong> relay media, so two peers behind
-            symmetric NAT or a UDP-blocking firewall will still fail to connect — that needs a TURN
-            server, which this project does not host. Changing these affects connections created
-            from now on; existing ones keep the configuration they started with.
+            Normally empty: the media server hands every session its own STUN servers and, when it
+            is configured with one, short-lived TURN credentials. Add servers here only for a relay
+            the operator runs separately. Changes apply to connections made from now on.
           </Notice>
           <Button
             variant="ghost"
             size="sm"
             className="self-start"
-            onClick={() => settings.setIceServerUrls([...DEFAULT_STUN_URLS])}
+            onClick={() => settings.setIceServerUrls([])}
           >
-            Restore default STUN servers
+            Clear extra servers
           </Button>
         </section>
       </div>

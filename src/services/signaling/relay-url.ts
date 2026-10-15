@@ -1,5 +1,5 @@
 /**
- * Where the signaling relay lives when the operator has not said.
+ * Where the media server lives when the operator has not said.
  *
  * Room-based joining is the default workflow — a guest opens a room link and
  * appears, with nothing to copy back — and that requires a relay. So a blank
@@ -39,55 +39,4 @@ export function defaultRelayUrl(): string {
 /** The address to actually dial: whatever is configured, else the default. */
 export function resolveRelayUrl(configured: string): string {
   return configured.trim() || defaultRelayUrl()
-}
-
-/** Path the relay serves TURN credentials on. See `server/src/turn-route.ts`. */
-export const ICE_SERVERS_PATH = '/ice-servers'
-
-/**
- * The HTTP endpoint that mints TURN credentials, derived from the relay URL.
- *
- * Derived rather than configured separately because the two are the same
- * process: the relay holds the Cloudflare API token, so wherever `/signal` is
- * reachable, `/ice-servers` is too. Asking an operator to set a second address
- * is a second thing to get wrong, and a mismatch would present as "TURN is
- * configured but no relay candidates appear".
- *
- * `VITE_ICE_SERVERS_URL` overrides it for the one deployment where that is not
- * true — credentials minted by a separate service.
- *
- * Returns '' when no address can be determined, which the caller treats the
- * same as an unconfigured relay: STUN only.
- */
-export function iceServersUrl(relayUrl: string): string {
-  const override = import.meta.env.VITE_ICE_SERVERS_URL
-  if (typeof override === 'string' && override.trim()) return override.trim()
-
-  const resolved = resolveRelayUrl(relayUrl)
-  if (!resolved) return ''
-
-  try {
-    // `ws:`/`wss:` are not special-cased by URL, so the scheme is swapped
-    // before parsing rather than after — `url.protocol = 'http:'` on a
-    // WebSocket URL is not reliably applied across browsers.
-    const asHttp = resolved.replace(/^ws(s)?:/i, (_match, secure) =>
-      secure ? 'https:' : 'http:',
-    )
-    const url = new URL(asHttp)
-    /*
-     * Replace the path rather than appending to it.
-     *
-     * A relay URL commonly carries `/signal` — either typed by an operator or
-     * produced by a proxy config — and appending would ask for
-     * `/signal/ice-servers`, which the relay does not serve.
-     */
-    url.pathname = ICE_SERVERS_PATH
-    url.search = ''
-    url.hash = ''
-    return url.toString()
-  } catch {
-    // An unparseable relay address is already reported by the transport; this
-    // just declines to guess at an endpoint.
-    return ''
-  }
 }

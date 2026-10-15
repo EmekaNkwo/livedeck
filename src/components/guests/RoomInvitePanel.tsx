@@ -1,194 +1,164 @@
 import { Check, ClipboardCopy } from 'lucide-react'
 import { useState } from 'react'
-import type { TransportState } from '@/services/signaling/types'
+import type { SessionSnapshot } from '@/media/types'
 import { Button } from '@/components/shared/Button'
 import { Notice } from '@/components/shared/Status'
 
 /**
- * Guest invitation when a signaling server is in play.
+ * Guest invitation.
  *
- * With a relay there is nothing to copy back and forth: both sides join a room
- * by name and the server introduces them. So this panel shows a plain join URL
- * and, more importantly, the *transport's own state* — because unlike the manual
- * flow, this one has a dependency that can be down, and the operator needs to
- * know that before they send anyone a link.
+ * Both sides join a room by name and the media server introduces them, so
+ * there is nothing to copy back and forth: one link for guests, one for
+ * producers who may control them. The panel also shows the session's own
+ * state, because the server is a dependency that can be down and an operator
+ * needs to know that before sending anyone a link.
  */
 
 export type RoomInvitePanelProps = {
   room: string
   serverUrl: string
-  transportState: TransportState
+  snapshot: SessionSnapshot
   supported: boolean
+  guestLink: string
+  producerLink: string | null
 }
 
-type TransportPresentation = {
-  tone: 'info' | 'warning' | 'error'
-  label: string
-  detail: string
-}
+type Presentation = { tone: 'info' | 'warning' | 'error'; label: string; detail: string }
 
-/**
- * Describe the transport honestly.
- *
- * `connected` means connected to the *relay* — not that any guest has joined,
- * and not that media is flowing. Conflating those is exactly the false-connected
- * display this project is meant to avoid, so the wording keeps them apart.
- */
-function describe(state: TransportState, serverUrl: string): TransportPresentation {
-  switch (state) {
-    case 'connected':
-      return {
-        tone: 'info',
-        label: 'Connected to the signaling server',
-        detail:
-          'Guests who open the link below will appear automatically. This says nothing about ' +
-          'whether any media has connected yet — the guest list reports that separately.',
-      }
-    case 'connecting':
-      return {
-        tone: 'warning',
-        label: 'Connecting to the signaling server…',
-        detail: `Reaching ${serverUrl}. Guests cannot be introduced until this succeeds.`,
-      }
-    case 'reconnecting':
-      return {
-        tone: 'warning',
-        label: 'Reconnecting to the signaling server…',
-        detail:
-          'The socket dropped and is being retried with backoff. Guests already negotiated stay ' +
-          'connected — their media is peer-to-peer and does not pass through the server. New ' +
-          'guests cannot join until this recovers.',
-      }
-    case 'failed':
-      return {
-        tone: 'error',
-        label: 'Could not reach the signaling server',
-        detail:
-          `No connection to ${serverUrl}. Check that the server in this repo is running and that ` +
-          'the address and allowed origins are right. Until then, switch Signaling to Manual in ' +
-          'Settings to invite guests with a link instead.',
-      }
-    case 'closed':
-      return {
-        tone: 'warning',
-        label: 'Signaling connection closed',
-        detail: 'The server closed the connection. Reload to rejoin the room.',
-      }
-    case 'idle':
-    default:
-      return {
-        tone: 'warning',
-        label: 'Not connected yet',
-        detail: 'The room has not been joined.',
-      }
+function describe(snapshot: SessionSnapshot, serverUrl: string): Presentation {
+  if (snapshot.status === 'failed') {
+    return {
+      tone: 'error',
+      label: 'Could not reach the media server',
+      detail:
+        snapshot.error ??
+        `No connection to ${serverUrl}. Check that the server is running and that the address and allowed origins are right.`,
+    }
   }
+  if (snapshot.status === 'recovering' || snapshot.signaling === 'reconnecting') {
+    return {
+      tone: 'warning',
+      label: 'Reconnecting to the media server…',
+      detail: 'The connection dropped and is being retried. Guests already in the room are kept for a short grace period.',
+    }
+  }
+  if (snapshot.status === 'joined') {
+    return {
+      tone: 'info',
+      label: snapshot.role === 'director' ? 'In the room as director' : `In the room as ${snapshot.role ?? 'guest'}`,
+      detail:
+        snapshot.role === 'director'
+          ? 'Guests who open the link below appear automatically. The guest list reports whether their media is arriving.'
+          : 'This control room does not hold the director key for this room, so it cannot control guests. Open the room with the director link to take over.',
+    }
+  }
+  if (snapshot.status === 'connecting' || snapshot.status === 'joining') {
+    return { tone: 'warning', label: 'Connecting to the media server…', detail: `Reaching ${serverUrl}.` }
+  }
+  if (snapshot.status === 'closed' && snapshot.closedBecause) {
+    return { tone: 'warning', label: 'The server closed this session', detail: `Reason: ${snapshot.closedBecause}. Reload to rejoin.` }
+  }
+  return { tone: 'warning', label: 'Not connected yet', detail: 'The room has not been joined.' }
+}
+
+function LinkBox({ id, title, url, hint }: { id: string; title: string; url: string; hint: string }) {
+  const [copied, setCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
+  const copy = async () => {
+    setCopyFailed(false)
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setCopyFailed(true)
+    }
+  }
+  return (
+    <div className="flex flex-col gap-2 border border-accent-600 bg-accent-500/5 p-2.5">
+      <p className="text-[10px] font-semibold tracking-wider text-accent-400 uppercase">{title}</p>
+      <label className="sr-only" htmlFor={id}>
+        {title}
+      </label>
+      <input
+        id={id}
+        type="text"
+        readOnly
+        value={url}
+        onFocus={(event) => event.currentTarget.select()}
+        className="url-box w-full border border-deck-600 bg-deck-950 px-2 py-1.5 text-ink-300"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="primary" size="sm" onClick={() => void copy()}>
+          {copied ? (
+            <Check aria-hidden="true" className="h-3.5 w-3.5" />
+          ) : (
+            <ClipboardCopy aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
+          {copied ? 'Copied' : 'Copy link'}
+        </Button>
+      </div>
+      {copyFailed ? (
+        <p className="text-[11px] text-live-400">
+          Clipboard access was refused — select the link above and copy it manually.
+        </p>
+      ) : null}
+      <span aria-live="polite" className="sr-only-live">
+        {copied ? `${title} copied to clipboard` : ''}
+      </span>
+      <p className="text-[10px] leading-relaxed text-ink-500">{hint}</p>
+    </div>
+  )
 }
 
 export function RoomInvitePanel({
   room,
   serverUrl,
-  transportState,
+  snapshot,
   supported,
+  guestLink,
+  producerLink,
 }: RoomInvitePanelProps) {
-  const [copied, setCopied] = useState(false)
-  const [copyFailed, setCopyFailed] = useState(false)
+  const status = describe(snapshot, serverUrl || 'the configured server')
 
-  // Guests get the push view for this room. No fragment: the relay carries the
-  // handshake, so there is nothing secret to smuggle past the server.
-  const joinUrl = `${window.location.origin}/push/${encodeURIComponent(room)}`
-  const status = describe(transportState, serverUrl || 'the configured server')
-
-  const copy = async () => {
-    setCopyFailed(false)
-    try {
-      await navigator.clipboard.writeText(joinUrl)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 2000)
-    } catch {
-      // Permissions, an insecure context, or no user activation. The textarea
-      // below stays selectable so this is recoverable.
-      setCopyFailed(true)
-    }
+  if (!supported) {
+    return (
+      <Notice tone="warning">
+        This browser does not support WebRTC, so guests cannot connect. Everything else — capture,
+        composition, the mixer and recording — still works.
+      </Notice>
+    )
   }
 
   return (
     <div className="flex flex-col gap-3">
-      {!supported ? (
-        <Notice tone="warning">
-          This browser does not support RTCPeerConnection, so guests cannot connect. Everything
-          else — capture, composition, the mixer and recording — still works.
-        </Notice>
-      ) : (
-        <>
-          <Notice tone={status.tone}>
-            <strong className="text-ink-200">{status.label}. </strong>
-            {status.detail}
-          </Notice>
+      <Notice tone={status.tone}>
+        <strong className="text-ink-200">{status.label}. </strong>
+        {status.detail}
+      </Notice>
 
-          {/*
-            One control, one link.
-            ----------------------
-            There is deliberately no guest-name field and no per-guest options.
-            The link is the room, so it is reusable and the same for everybody —
-            baking a name into it would be wrong the moment it is forwarded, and
-            guests name themselves on the join screen anyway.
-          */}
-          <div className="flex flex-col gap-2 border border-accent-600 bg-accent-500/5 p-2.5">
-            <p className="text-[10px] font-semibold tracking-wider text-accent-400 uppercase">
-              Room link
-            </p>
-            <label className="sr-only" htmlFor="room-join-link">
-              Guest join link
-            </label>
-            <input
-              id="room-join-link"
-              type="text"
-              readOnly
-              value={joinUrl}
-              onFocus={(event) => event.currentTarget.select()}
-              className="url-box w-full border border-deck-600 bg-deck-950 px-2 py-1.5 text-ink-300"
-            />
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="primary" size="sm" onClick={() => void copy()}>
-                {copied ? (
-                  <Check aria-hidden="true" className="h-3.5 w-3.5" />
-                ) : (
-                  <ClipboardCopy aria-hidden="true" className="h-3.5 w-3.5" />
-                )}
-                {copied ? 'Copied' : 'Copy room link'}
-              </Button>
-              <span className="font-mono text-[10px] text-ink-500">room · {room}</span>
-            </div>
-            {copyFailed ? (
-              <p className="text-[11px] text-live-400">
-                Clipboard access was refused — select the link above and copy it manually.
-              </p>
-            ) : null}
-            <span aria-live="polite" className="sr-only-live">
-              {copied ? 'Room link copied to clipboard' : ''}
-            </span>
-            <p className="text-[10px] leading-relaxed text-ink-500">
-              Send it to anyone. They set a name, click <strong>Join room</strong>, and appear in
-              the list above — nothing to copy back.
-            </p>
-          </div>
+      <LinkBox
+        id="room-join-link"
+        title="Guest link"
+        url={guestLink}
+        hint="Send it to anyone. They set a name, click Join room, and appear in the list above. They can see and hear each other and cannot control anyone."
+      />
 
-          <Notice tone="warning">
-            <strong className="text-ink-200">The room link is the only access control. </strong>
-            Anyone who can reach your signaling server and guesses this room name will join it and
-            be offered a connection. There is no account and no token — run the server on a network
-            you control if that matters.
-          </Notice>
+      {producerLink ? (
+        <LinkBox
+          id="room-producer-link"
+          title="Producer link"
+          url={producerLink}
+          hint="For a co-host who should be able to mute, cue and rename guests. Treat it like a password: anyone holding it has those controls."
+        />
+      ) : null}
 
-          <Notice>
-            <strong className="text-ink-200">Media is still peer-to-peer. </strong>
-            The server only relays the text of the handshake. Audio and video go directly between
-            browsers, so the same NAT limits apply: without a TURN server, two peers behind
-            symmetric NAT will still fail to connect, and the guest list will say <em>failed</em>{' '}
-            rather than pretend otherwise.
-          </Notice>
-        </>
-      )}
+      <Notice tone="warning">
+        <strong className="text-ink-200">The room name is not access control. </strong>
+        Anyone who reaches the media server and guesses <code className="url-box">{room}</code>{' '}
+        joins as a guest. Roles are decided by the server from the key in the link, never by the
+        guest&apos;s browser.
+      </Notice>
     </div>
   )
 }

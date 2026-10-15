@@ -25,7 +25,6 @@ type SettingsState = {
   setPreviewFrameRate: (fps: FrameRateId) => void
   setMonitorProgramAudio: (enabled: boolean) => void
   setIceServerUrls: (urls: string[]) => void
-  setSignalingTransport: (transport: 'manual' | 'server') => void
   setSignalingServerUrl: (url: string) => void
   reset: () => void
 }
@@ -68,9 +67,6 @@ export const useSettingsStore = create<SettingsState>()(
       setIceServerUrls: (iceServerUrls) =>
         set((state) => ({ settings: { ...state.settings, iceServerUrls } })),
 
-      setSignalingTransport: (signalingTransport) =>
-        set((state) => ({ settings: { ...state.settings, signalingTransport } })),
-
       setSignalingServerUrl: (signalingServerUrl) =>
         set((state) => ({ settings: { ...state.settings, signalingServerUrl } })),
 
@@ -81,24 +77,26 @@ export const useSettingsStore = create<SettingsState>()(
       storage: createJSONStorage(() => createSafeStorage()),
       // Only `settings` is persisted; `revision` is a render-scheduling detail.
       partialize: (state) => ({ settings: state.settings }),
-      version: 2,
+      version: 3,
       /**
-       * v1 → v2: room-based signaling became the default.
+       * v1/v2 → v3: the signaling transport setting is gone.
        *
-       * A v1 install persisted `signalingTransport: 'manual'` because that was
-       * the only default, not because the operator chose it. Carrying that
-       * forward would leave every existing browser on the copy-a-link flow with
-       * no indication that the room flow now exists, so the old default is
-       * migrated to the new one. Anyone who genuinely wants manual still has
-       * the setting, and this runs once.
+       * Media now goes through the SFU, so there is one transport and nothing
+       * to choose. A persisted `signalingTransport` is dropped; the server URL
+       * is kept. The static STUN list that used to be the default is cleared
+       * too, because the server now issues ICE servers per session.
        */
       migrate: (persisted, version) => {
-        if (version >= 2) return persisted
-        const state = persisted as { settings?: Partial<StudioSettings> } | undefined
+        if (version >= 3) return persisted
+        const state = persisted as { settings?: Record<string, unknown> } | undefined
         if (!state?.settings) return persisted
+        const { signalingTransport: _dropped, iceServerUrls, ...rest } = state.settings
+        void _dropped
+        const wasDefaultStun =
+          Array.isArray(iceServerUrls) && iceServerUrls.every((url) => String(url).startsWith('stun:stun'))
         return {
           ...state,
-          settings: { ...state.settings, signalingTransport: 'server' as const },
+          settings: { ...rest, iceServerUrls: wasDefaultStun ? [] : iceServerUrls },
         }
       },
       // Merge rather than replace, so a settings key added in a later version
