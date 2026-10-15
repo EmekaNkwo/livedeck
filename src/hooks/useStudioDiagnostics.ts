@@ -155,6 +155,7 @@ export function useStudioDiagnostics(): StudioDiagnostics {
 
 function sampleLive() {
   const canvas = compositor.getCanvas()
+  const output = compositor.getOutputSize()
   return {
     streams: streamRegistry.keys().map((key) => ({
       key,
@@ -164,7 +165,7 @@ function sampleLive() {
     compositor: {
       ...compositor.getStats(),
       running: compositor.isRunning(),
-      canvas: canvas ? `${canvas.width}×${canvas.height}` : 'not attached',
+      canvas: canvas ? `${output.width}×${output.height}` : 'not attached',
     },
     supportedFormats: listSupportedFormats(),
     objectUrlCount: trackedUrlCount(),

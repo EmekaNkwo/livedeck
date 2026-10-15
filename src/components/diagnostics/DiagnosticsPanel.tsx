@@ -61,6 +61,20 @@ export function DiagnosticsPanel() {
         <Section title="Compositor">
           <Metric label="Canvas" value={diagnostics.compositor.canvas} />
           <Metric label="Running" value={diagnostics.compositor.running ? 'yes' : 'no'} mono={false} />
+          <Metric
+            label="Painting on"
+            value={
+              diagnostics.compositor.paintThread === 'worker'
+                ? 'worker thread'
+                : diagnostics.compositor.paintThread === 'main'
+                  ? 'main thread'
+                  : '—'
+            }
+            mono={false}
+          />
+          {diagnostics.compositor.paintError ? (
+            <Metric label="Paint error" value={diagnostics.compositor.paintError} mono={false} />
+          ) : null}
           <Metric label="Measured rate" value={formatMetric(diagnostics.compositor.fps, 'fps')} />
           <Metric label="Frames drawn" value={diagnostics.compositor.framesRendered} />
           <Metric

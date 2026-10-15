@@ -186,9 +186,16 @@ export async function canvasSize(page: Page): Promise<{ width: number; height: n
 export async function canvasHasContent(page: Page): Promise<boolean> {
   return page.locator('canvas').first().evaluate((element) => {
     const canvas = element as HTMLCanvasElement
-    const context = canvas.getContext('2d')
-    if (!context) return false
-    const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
+    // The program canvas is usually painted by a worker, which makes its own
+    // context unavailable here; drawing it onto a probe canvas reads exactly
+    // what the page (and captureStream) sees, on either path.
+    const probe = document.createElement('canvas')
+    probe.width = canvas.width
+    probe.height = canvas.height
+    const context = probe.getContext('2d')
+    if (!context || probe.width === 0 || probe.height === 0) return false
+    context.drawImage(canvas, 0, 0)
+    const { data } = context.getImageData(0, 0, probe.width, probe.height)
     // The background is #08090c; anything meaningfully brighter is a source.
     for (let i = 0; i < data.length; i += 4) {
       const r = data[i] ?? 0

@@ -1,17 +1,12 @@
-import type { CropInsets, Size } from '@/types/geometry'
-import type { MediaSource, SceneItem, TextStyle } from '@/types/source'
-import { resolveCropRect } from '@/utils/geometry'
+import type { Size } from '@/types/geometry'
+import type { TextStyle } from '@/types/source'
 import { assetCache } from './asset-cache'
 import { FrameClock } from './frame-clock'
-import type { Frame } from './frame-providers'
 import { resolveFrame } from './frame-providers'
-import type { CompositionSnapshot, ResolvedScene } from './composition-model'
-import {
-  EMPTY_SNAPSHOT,
-  easeTransition,
-  hasLiveMedia,
-  transitionProgress,
-} from './composition-model'
+import type { CompositionSnapshot } from './composition-model'
+import { EMPTY_SNAPSHOT, hasLiveMedia } from './composition-model'
+import { planFrame } from './paint-plan'
+import { MainThreadPainter, WorkerPainter, type PaintThread, type Painter } from './painters'
 
 /**
  * The program compositor.
@@ -30,6 +25,14 @@ import {
  * literally the pixels the user is previewing. There is no second compositor
  * and therefore no possibility of preview and output diverging.
  *
+ * WHERE PIXELS ARE PAINTED
+ * ------------------------
+ * Each tick, the main thread plans the frame (which sources, where, which
+ * video frame) and a painter draws it. Where the browser allows, the canvas
+ * is handed to a worker as an OffscreenCanvas and painting happens there, so
+ * compositing, transitions and text layout never block the page. Otherwise
+ * it paints here. Both run the same painter over the same plan.
+ *
  * SCHEDULING
  * ----------
  * Driven by a {@link FrameClock}: `requestAnimationFrame` while the tab is
@@ -45,17 +48,37 @@ export type CompositorStats = {
   framesRendered: number
   framesSkipped: number
   lastFrameDurationMs: number
+  /** Where frames are painted; null when no canvas is attached. */
+  paintThread: PaintThread | null
+  /** The last error the painter reported, if any. */
+  paintError: string | null
 }
 
 type SnapshotSource = () => CompositionSnapshot
 
+/** How long a released worker waits for its canvas to be attached again. */
+const WORKER_RELEASE_MS = 10_000
+
+/**
+ * Workers that own a canvas. A canvas can be handed to a worker only once,
+ * so when React detaches and re-attaches the same element (StrictMode does
+ * this on every mount) the existing worker must be reused.
+ */
+const workerByCanvas = new WeakMap<HTMLCanvasElement, { painter: WorkerPainter; release: ReturnType<typeof setTimeout> | null }>()
+
+/** `?paint=main` keeps painting on the page, for diagnosing the worker path. */
+function workerPaintingAllowed(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? '').get('paint') !== 'main'
+  } catch {
+    return true
+  }
+}
+
 export class CanvasCompositor {
   private canvas: HTMLCanvasElement | null = null
-  private ctx: CanvasRenderingContext2D | null = null
-
-  /** Scratch canvases used only while a transition is in flight. */
-  private scratchA: HTMLCanvasElement | null = null
-  private scratchB: HTMLCanvasElement | null = null
+  private painter: Painter | null = null
+  private outputSize: Size = { width: 0, height: 0 }
 
   private getSnapshot: SnapshotSource = () => EMPTY_SNAPSHOT
   private readonly clock = new FrameClock()
@@ -71,29 +94,24 @@ export class CanvasCompositor {
   private framesSkipped = 0
   private fpsWindowStart = 0
   private fpsWindowFrames = 0
+  private paintError: string | null = null
   private stats: CompositorStats = {
     fps: 0,
     framesRendered: 0,
     framesSkipped: 0,
     lastFrameDurationMs: 0,
+    paintThread: null,
+    paintError: null,
   }
 
   /** Attach the canvas the compositor paints into. */
   attach(canvas: HTMLCanvasElement): void {
+    if (this.canvas && this.canvas !== canvas) this.detach()
     this.canvas = canvas
-    /*
-     * `alpha: false` lets the browser skip per-pixel blending with the page,
-     * which measurably reduces compositing cost for a full-frame opaque
-     * program feed.
-     *
-     * `desynchronized: true` is deliberately NOT used. It lets the canvas
-     * bypass the normal commit path, and in Chromium that makes `getImageData`
-     * read back a stale or empty buffer — verified by a browser test that drew
-     * a white frame and read back transparent black. For a canvas whose pixels
-     * are the product (captured for recording and for peer senders), reliable
-     * readback matters far more than the small latency win.
-     */
-    this.ctx = canvas.getContext('2d', { alpha: false })
+    this.outputSize = { width: canvas.width, height: canvas.height }
+    this.painter = this.createPainter(canvas)
+    this.paintError = this.painter ? null : 'The program canvas could not be painted.'
+    this.stats = { ...this.stats, paintThread: this.painter?.thread ?? null, paintError: this.paintError }
     this.lastRevision = -1
     // A decoded image or a video's first frame changes what a static scene
     // looks like without any store revision moving; invalidate so the next
@@ -111,14 +129,32 @@ export class CanvasCompositor {
     this.stop()
     this.unsubscribeAssets?.()
     this.unsubscribeAssets = null
+    const canvas = this.canvas
+    const painter = this.painter
     this.canvas = null
-    this.ctx = null
-    this.scratchA = null
-    this.scratchB = null
+    this.painter = null
+    if (painter instanceof WorkerPainter && canvas) {
+      const entry = workerByCanvas.get(canvas)
+      if (entry) {
+        // Keep the worker briefly: the same element may be attached again.
+        entry.release = setTimeout(() => {
+          workerByCanvas.delete(canvas)
+          entry.painter.dispose()
+        }, WORKER_RELEASE_MS)
+      }
+    } else {
+      painter?.dispose()
+    }
+    this.stats = { ...this.stats, paintThread: null }
   }
 
   getCanvas(): HTMLCanvasElement | null {
     return this.canvas
+  }
+
+  /** The program's output size: what is painted, captured and recorded. */
+  getOutputSize(): Size {
+    return this.outputSize
   }
 
   setSnapshotSource(source: SnapshotSource): void {
@@ -132,12 +168,11 @@ export class CanvasCompositor {
 
   /** Resize the logical output. No-op when the size is unchanged. */
   resize(size: Size): void {
-    const canvas = this.canvas
-    if (!canvas) return
+    if (!this.canvas || !this.painter) return
     if (this.sizeLocked) return
-    if (canvas.width === size.width && canvas.height === size.height) return
-    canvas.width = size.width
-    canvas.height = size.height
+    if (this.outputSize.width === size.width && this.outputSize.height === size.height) return
+    this.outputSize = { width: size.width, height: size.height }
+    this.painter.resize(size.width, size.height)
     // Changing the backing store clears it, so force a repaint.
     this.lastRevision = -1
   }
@@ -193,6 +228,29 @@ export class CanvasCompositor {
     this.paint(this.getSnapshot(), performance.now())
   }
 
+  private createPainter(canvas: HTMLCanvasElement): Painter | null {
+    const existing = workerByCanvas.get(canvas)
+    if (existing) {
+      if (existing.release) clearTimeout(existing.release)
+      existing.release = null
+      return existing.painter
+    }
+    if (workerPaintingAllowed()) {
+      const worker = WorkerPainter.create(canvas, {
+        onImageReady: () => this.invalidate(),
+        onError: (message) => {
+          this.paintError = message
+          this.stats = { ...this.stats, paintError: message }
+        },
+      })
+      if (worker) {
+        workerByCanvas.set(canvas, { painter: worker, release: null })
+        return worker
+      }
+    }
+    return MainThreadPainter.create(canvas)
+  }
+
   private onAnimationFrame(): void {
     const now = performance.now()
     const minInterval = 1000 / this.targetFps
@@ -213,296 +271,47 @@ export class CanvasCompositor {
       return
     }
 
+    // A painter still busy with the previous frame drops this one; the
+    // revision is not recorded, so a static change is retried next tick.
+    if (!this.paint(snapshot, now)) {
+      this.framesSkipped += 1
+      return
+    }
     this.lastPaintAt = now
     this.lastRevision = snapshot.revision
-    this.paint(snapshot, now)
   }
 
-  private paint(snapshot: CompositionSnapshot, now: number): void {
-    const canvas = this.canvas
-    const ctx = this.ctx
-    if (!canvas || !ctx) return
+  private paint(snapshot: CompositionSnapshot, now: number): boolean {
+    const painter = this.painter
+    if (!this.canvas || !painter) return false
 
     if (!this.sizeLocked) this.resize(snapshot.canvas)
-    const started = performance.now()
-
-    const transition = snapshot.transition
-    if (transition && snapshot.outgoing) {
-      const raw = transitionProgress(transition, now)
-      const t = easeTransition(raw)
-      this.paintTransition(ctx, snapshot, t, transition.type)
-    } else {
-      this.paintScene(ctx, snapshot.current, snapshot, 1)
-    }
+    const planned = planFrame(
+      { ...snapshot, canvas: this.outputSize },
+      now,
+      resolveFrame,
+    )
+    if (!painter.paint(planned)) return false
 
     this.framesRendered += 1
     this.fpsWindowFrames += 1
     const elapsedWindow = now - this.fpsWindowStart
+    const common = {
+      framesRendered: this.framesRendered,
+      framesSkipped: this.framesSkipped,
+      lastFrameDurationMs: painter.lastPaintMs(),
+      paintThread: painter.thread,
+      paintError: this.paintError,
+    }
     if (elapsedWindow >= 1000) {
-      this.stats = {
-        fps: Math.round((this.fpsWindowFrames * 1000) / elapsedWindow),
-        framesRendered: this.framesRendered,
-        framesSkipped: this.framesSkipped,
-        lastFrameDurationMs: performance.now() - started,
-      }
+      this.stats = { ...common, fps: Math.round((this.fpsWindowFrames * 1000) / elapsedWindow) }
       this.fpsWindowStart = now
       this.fpsWindowFrames = 0
     } else {
-      this.stats = {
-        ...this.stats,
-        framesRendered: this.framesRendered,
-        framesSkipped: this.framesSkipped,
-        lastFrameDurationMs: performance.now() - started,
-      }
+      this.stats = { ...this.stats, ...common }
     }
+    return true
   }
-
-  private paintTransition(
-    ctx: CanvasRenderingContext2D,
-    snapshot: CompositionSnapshot,
-    t: number,
-    type: 'cut' | 'fade' | 'crossfade',
-  ): void {
-    if (type === 'cut') {
-      this.paintScene(ctx, snapshot.current, snapshot, 1)
-      return
-    }
-
-    if (type === 'crossfade') {
-      // Direct A-over-B dissolve. Both scenes are rendered to scratch canvases
-      // first so that per-layer opacity inside a scene is not multiplied by the
-      // transition alpha more than once.
-      const from = this.renderToScratch('a', snapshot.outgoing, snapshot)
-      const to = this.renderToScratch('b', snapshot.current, snapshot)
-      ctx.save()
-      ctx.globalAlpha = 1
-      if (from) ctx.drawImage(from, 0, 0)
-      ctx.globalAlpha = t
-      if (to) ctx.drawImage(to, 0, 0)
-      ctx.restore()
-      return
-    }
-
-    // 'fade' = dip through the background colour: outgoing fades out over the
-    // first half, incoming fades in over the second. Reads as a deliberate
-    // broadcast fade rather than a dissolve.
-    this.fillBackground(ctx, snapshot)
-    if (t < 0.5) {
-      const alpha = 1 - t / 0.5
-      const from = this.renderToScratch('a', snapshot.outgoing, snapshot)
-      if (from) {
-        ctx.save()
-        ctx.globalAlpha = alpha
-        ctx.drawImage(from, 0, 0)
-        ctx.restore()
-      }
-    } else {
-      const alpha = (t - 0.5) / 0.5
-      const to = this.renderToScratch('b', snapshot.current, snapshot)
-      if (to) {
-        ctx.save()
-        ctx.globalAlpha = alpha
-        ctx.drawImage(to, 0, 0)
-        ctx.restore()
-      }
-    }
-  }
-
-  private renderToScratch(
-    slot: 'a' | 'b',
-    scene: ResolvedScene | null,
-    snapshot: CompositionSnapshot,
-  ): HTMLCanvasElement | null {
-    const canvas = this.ensureScratch(slot, snapshot.canvas)
-    if (!canvas) return null
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return null
-    this.paintScene(ctx, scene, snapshot, 1)
-    return canvas
-  }
-
-  private ensureScratch(slot: 'a' | 'b', size: Size): HTMLCanvasElement | null {
-    const current = slot === 'a' ? this.scratchA : this.scratchB
-    const canvas = current ?? document.createElement('canvas')
-    if (canvas.width !== size.width || canvas.height !== size.height) {
-      canvas.width = size.width
-      canvas.height = size.height
-    }
-    if (slot === 'a') this.scratchA = canvas
-    else this.scratchB = canvas
-    return canvas
-  }
-
-  private fillBackground(ctx: CanvasRenderingContext2D, snapshot: CompositionSnapshot): void {
-    ctx.save()
-    ctx.globalAlpha = 1
-    ctx.globalCompositeOperation = 'source-over'
-    ctx.fillStyle = snapshot.background
-    ctx.fillRect(0, 0, snapshot.canvas.width, snapshot.canvas.height)
-    ctx.restore()
-  }
-
-  private paintScene(
-    ctx: CanvasRenderingContext2D,
-    scene: ResolvedScene | null,
-    snapshot: CompositionSnapshot,
-    sceneAlpha: number,
-  ): void {
-    this.fillBackground(ctx, snapshot)
-    if (!scene) return
-    for (const layer of scene.layers) {
-      this.paintLayer(ctx, layer.item, layer.source, snapshot.canvas, sceneAlpha)
-    }
-  }
-
-  private paintLayer(
-    ctx: CanvasRenderingContext2D,
-    item: SceneItem,
-    source: MediaSource,
-    canvas: Size,
-    sceneAlpha: number,
-  ): void {
-    const frame = resolveFrame(source)
-    if (frame.kind === 'empty') return
-
-    const alpha = item.opacity * sceneAlpha
-    if (alpha <= 0) return
-
-    const dx = item.transform.x * canvas.width
-    const dy = item.transform.y * canvas.height
-    const dw = item.transform.width * canvas.width
-    const dh = item.transform.height * canvas.height
-    if (dw <= 0 || dh <= 0) return
-
-    ctx.save()
-    ctx.globalAlpha = alpha
-
-    // Rotation and mirroring are applied about the item's centre, so the box
-    // the user dragged stays where they dragged it.
-    const cx = dx + dw / 2
-    const cy = dy + dh / 2
-    ctx.translate(cx, cy)
-    if (item.transform.rotation !== 0) {
-      ctx.rotate((item.transform.rotation * Math.PI) / 180)
-    }
-    if (item.mirrored) ctx.scale(-1, 1)
-    ctx.translate(-cx, -cy)
-
-    try {
-      this.drawFrame(ctx, frame, item, { x: dx, y: dy, width: dw, height: dh })
-    } catch {
-      // drawImage can still throw for a source that became invalid between
-      // resolveFrame and the draw (tab discarded, track torn down). Skipping
-      // this layer keeps the rest of the frame — and the recording — alive.
-    }
-
-    ctx.restore()
-  }
-
-  private drawFrame(
-    ctx: CanvasRenderingContext2D,
-    frame: Frame,
-    item: SceneItem,
-    dest: { x: number; y: number; width: number; height: number },
-  ): void {
-    switch (frame.kind) {
-      case 'fill': {
-        ctx.fillStyle = frame.color
-        ctx.fillRect(dest.x, dest.y, dest.width, dest.height)
-        return
-      }
-      case 'text': {
-        drawText(ctx, frame.source, dest)
-        return
-      }
-      case 'drawable': {
-        const crop = resolveCropRect(frame.intrinsic, item.transform.crop)
-        if (!crop) return
-        // The 9-argument form maps the cropped sub-rectangle of the source onto
-        // the destination box, which is what makes crop affect real output
-        // rather than being a UI-only overlay.
-        ctx.drawImage(
-          frame.drawable,
-          crop.x,
-          crop.y,
-          crop.width,
-          crop.height,
-          dest.x,
-          dest.y,
-          dest.width,
-          dest.height,
-        )
-        return
-      }
-      case 'empty':
-        return
-    }
-  }
-}
-
-function drawText(
-  ctx: CanvasRenderingContext2D,
-  source: MediaSource,
-  dest: { x: number; y: number; width: number; height: number },
-): void {
-  if (source.settings.kind !== 'text') return
-  const { text, style } = source.settings
-
-  if (style.backgroundColor) {
-    ctx.fillStyle = style.backgroundColor
-    ctx.fillRect(dest.x, dest.y, dest.width, dest.height)
-  }
-
-  const weight = style.bold ? '700' : '400'
-  ctx.font = `${weight} ${style.fontSize}px ${style.fontFamily}`
-  ctx.fillStyle = style.color
-  ctx.textBaseline = 'middle'
-  ctx.textAlign = style.align === 'center' ? 'center' : style.align === 'right' ? 'right' : 'left'
-
-  const padding = style.fontSize * 0.4
-  const originX =
-    style.align === 'center'
-      ? dest.x + dest.width / 2
-      : style.align === 'right'
-        ? dest.x + dest.width - padding
-        : dest.x + padding
-
-  const lines = wrapText(ctx, text, dest.width - padding * 2)
-  const lineHeight = style.fontSize * 1.25
-  const totalHeight = lines.length * lineHeight
-  let y = dest.y + dest.height / 2 - totalHeight / 2 + lineHeight / 2
-
-  for (const line of lines) {
-    ctx.fillText(line, originX, y)
-    y += lineHeight
-  }
-}
-
-/** Greedy word wrap using real glyph metrics from the canvas context. */
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  if (maxWidth <= 0) return [text]
-  const paragraphs = text.split('\n')
-  const lines: string[] = []
-  for (const paragraph of paragraphs) {
-    const words = paragraph.split(/\s+/).filter(Boolean)
-    if (words.length === 0) {
-      lines.push('')
-      continue
-    }
-    let line = words[0] ?? ''
-    for (let i = 1; i < words.length; i += 1) {
-      const word = words[i] ?? ''
-      const candidate = `${line} ${word}`
-      if (ctx.measureText(candidate).width <= maxWidth) {
-        line = candidate
-      } else {
-        lines.push(line)
-        line = word
-      }
-    }
-    lines.push(line)
-  }
-  return lines
 }
 
 export const DEFAULT_TEXT_STYLE: TextStyle = {
@@ -513,8 +322,6 @@ export const DEFAULT_TEXT_STYLE: TextStyle = {
   align: 'center',
   bold: true,
 }
-
-export type { CropInsets }
 
 /** One compositor per document, mirroring the single program output. */
 export const compositor = new CanvasCompositor()
