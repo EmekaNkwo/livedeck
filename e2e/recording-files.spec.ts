@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { DEPLOYED } from './fixtures'
 
 /**
  * The files a recording produces, checked byte by byte in a real browser.
@@ -227,6 +228,8 @@ async function record(page: Page, mode: 'mp4' | 'webm' | 'crash', seconds: numbe
 }
 
 test.describe('recorded files', () => {
+  test.skip(DEPLOYED, "Loads the app's source modules, which only the dev server serves.")
+
   test.beforeEach(async ({ page }) => {
     await page.goto('/')
   })

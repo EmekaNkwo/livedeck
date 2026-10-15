@@ -8,6 +8,7 @@ import {
   sessionControl,
   trackSockets,
   pointAtMediaServer,
+  DEPLOYED,
 } from './fixtures'
 
 /**
@@ -38,6 +39,8 @@ async function joinAsGuest(browser: Browser, room: string, name: string): Promis
 }
 
 test.describe('Scenario I: authorization and recovery', () => {
+  test.skip(DEPLOYED, 'Drives the dev-only session hook; e2e/deployment.spec.ts checks authorization over the wire instead.')
+
   test.beforeEach(async ({ page }) => {
     await pointAtMediaServer(page)
   })

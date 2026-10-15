@@ -695,6 +695,15 @@ a recording.
   the destination box, which is what makes crop affect real output.
 - Rotation and mirroring are applied about the item's centre, matching the
   editor overlay's CSS transform exactly.
+- **Painting happens in a worker.** Each tick the main thread plans the frame
+  (which sources, where, which video frame) as plain data; a worker that owns
+  the canvas as an `OffscreenCanvas` draws it. Video goes over as one
+  `VideoFrame` per source per frame, closed right after drawing; still images
+  go once as `ImageBitmap`s. One frame is in flight at a time, so a slow paint
+  drops a frame instead of queueing decoder buffers. `captureStream()` on the
+  page's canvas carries the worker's pixels. Browsers without the APIs paint
+  on the page with the same painter; `?paint=main` forces that, and
+  Diagnostics shows which thread paints.
 - The loop is driven by `requestAnimationFrame` but gated to a target rate, and
   **skipped entirely** when nothing is animating and no live media is on screen
   (a `revision` counter on the stores detects static changes). The captured
@@ -795,10 +804,26 @@ in a browser tab is an acoustic feedback loop.
 ## The recording pipeline
 
 ```
-Program canvas ──▶ canvas.captureStream(fps) ──▶ video track ─┐
-                                                              ├─▶ MediaRecorder ──▶ Blob
-Audio mixer ─────▶ MediaStreamAudioDestination ──▶ audio track┘
+Program canvas ──▶ captureStream(fps) ──▶ video ─┐   WebCodecs (H.264 + AAC) ──▶ fragmented MP4 ─┐
+                                                 ├─▶                                              ├─▶ IndexedDB chunks
+Audio mixer ──▶ MediaStreamAudioDestination ──▶ audio ┘   or MediaRecorder ──────▶ streamed WebM ─┘
+                                                              Stop / recovery ──▶ remux ──▶ standard MP4 / indexed WebM
 ```
+
+Where WebCodecs can encode H.264 at the program size (Chromium), frames are
+encoded into **fragmented MP4** with H.264 and AAC (Opus where AAC is not
+available). Each fragment, about a second, is written to IndexedDB as soon as
+it completes. Elsewhere MediaRecorder encodes as before.
+
+**On Stop, and when an interrupted recording is recovered**, the stored file is
+rewritten without re-encoding into a **standard MP4** (one index, no fragments)
+or a **WebM with a duration and a cue index**, so it reports its length,
+seeks, and opens in editors. The rewrite goes to a scratch file, is read back
+and checked (every track present, a real duration), and only then replaces the
+capture in one IndexedDB transaction. If any step fails the captured file is
+kept, with its WebM duration patched in, and the studio says why.
+`e2e/recording-files.spec.ts` checks the bytes of all three outcomes with the
+browser's real encoders.
 
 Because there is no separate render or mix for recording, scene switches,
 transforms, crops, rotations, hidden sources, mutes and fader moves are all in
@@ -987,6 +1012,11 @@ found the URL.
 
 ### Deployment
 
+[`deploy/`](deploy/README.md) runs the whole product on one host that can
+publish UDP: Caddy (studio, TLS, `/signal` proxy), the media server, and
+coturn, in one `docker compose` command. The browser suite runs against it
+with `LIVEDECK_BASE_URL=https://<domain> npm run e2e`.
+
 The server holds rooms and routers in one process's memory and needs a
 reachable UDP (and TCP) media port. That means a container or VM with those
 ports published — Fly.io, a VPS, Kubernetes with a host port — and
@@ -1109,6 +1139,12 @@ already taken by something else, point both at a free one:
 LIVEDECK_RELAY_PORT=3100 npm run e2e
 ```
 
+Or run it against a deployment, with no local servers:
+
+```bash
+LIVEDECK_BASE_URL=https://studio.example.com npm run e2e
+```
+
 ### What is tested where, and why
 
 **Pure logic** (no mocks needed): geometry and transform normalization, crop
@@ -1200,17 +1236,15 @@ Collected honestly in one place.
 4. **Display audio is not guaranteed.** `audio: true` is a request; whether a
    track arrives depends on the OS, browser and surface. The app inspects the
    tracks and says when none arrived.
-5. **A recording is finalized only on Stop.** Chunks are stored every second,
-   so a crash loses at most the last one and the recording is recovered on
-   the next load with a duration computed from the chunk timestamps — but
-   the last slice is gone.
-6. **WebM files carry a duration but no cues.** Browsers and most players
-   seek them; some editors want a cues index, which needs a full re-mux
-   (a WebCodecs + MP4 path is the next step). Safari records MP4 natively.
-7. **The compositor paints on the main thread.** A worker-timed clock keeps
-   frames flowing when the tab is hidden, but a very heavy UI frame can still
-   delay a paint. Moving painting into a worker needs frame providers that
-   do not depend on `HTMLVideoElement`.
+5. **A crash loses the fragment in progress.** Fragments and chunks are
+   stored about every second; the recording is recovered and finalized on
+   the next load, minus that last second.
+6. **The MP4 path needs WebCodecs H.264.** Chromium has it. Firefox records
+   WebM through MediaRecorder (finalized with cues); Safari records MP4
+   natively through MediaRecorder.
+7. **The main thread still plans each frame.** Painting is in a worker, but
+   turning `<video>` elements into `VideoFrame`s happens on the page, so a
+   very long main-thread task can still delay a frame.
 8. **Output quality cannot exceed the sources.**
 9. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
    missing. The control is disabled with an explanation.

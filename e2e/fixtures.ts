@@ -122,7 +122,21 @@ export async function selfParticipantId(page: Page): Promise<string | null> {
  *     LIVEDECK_RELAY_PORT=3100 npm run e2e
  */
 export const RELAY_PORT = process.env.LIVEDECK_RELAY_PORT ?? '3001'
-export const RELAY_URL = `ws://localhost:${RELAY_PORT}`
+
+/**
+ * A deployed studio to test instead of the local dev servers, e.g.
+ * `LIVEDECK_BASE_URL=https://studio.example.com npm run e2e`. Signaling is
+ * then the deployment's own origin, as the built studio resolves it.
+ */
+export const DEPLOYED_BASE_URL = process.env.LIVEDECK_BASE_URL?.replace(/\/$/, '') ?? null
+export const DEPLOYED = DEPLOYED_BASE_URL !== null
+
+export const RELAY_URL = DEPLOYED_BASE_URL
+  ? DEPLOYED_BASE_URL.replace(/^http/, 'ws')
+  : `ws://localhost:${RELAY_PORT}`
+
+/** The media server's health endpoint, wherever the server under test is. */
+export const HEALTH_URL = DEPLOYED_BASE_URL ? `${DEPLOYED_BASE_URL}/healthz` : `http://localhost:${RELAY_PORT}/healthz`
 
 /**
  * Open the director control room for a room.

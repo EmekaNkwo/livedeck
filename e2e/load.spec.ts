@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Page } from '@playwright/test'
-import { RELAY_PORT, guestTiles, openDirector, openTab, pointAtMediaServer } from './fixtures'
+import { HEALTH_URL, guestTiles, openDirector, openTab, pointAtMediaServer } from './fixtures'
 
 /**
  * Scenario L — a twelve-person studio.
@@ -51,7 +51,8 @@ test.describe('Scenario L: twelve participants', () => {
     await expect(sharer.getByRole('button', { name: /Stop sharing/i })).toBeVisible({ timeout: 30_000 })
 
     // Server view.
-    const health = (await (await fetch(`http://localhost:${RELAY_PORT}/healthz`)).json()) as {
+    // page.request honours ignoreHTTPSErrors, so this works against a trial deployment too.
+    const health = (await (await page.request.get(HEALTH_URL)).json()) as {
       rooms: number
       peers: number
     }
@@ -157,7 +158,7 @@ test.describe('Scenario L: twelve participants', () => {
         ...(network[index] ?? {}),
       }
     })
-    const finalHealth = await (await fetch(`http://localhost:${RELAY_PORT}/healthz`)).json()
+    const finalHealth = (await (await page.request.get(HEALTH_URL)).json()) as { producers: number; peers: number }
     test.info().annotations.push({ type: 'load-metrics', description: JSON.stringify({ server: finalHealth, metrics }) })
     console.info('[load] server', JSON.stringify(finalHealth))
     console.table(metrics)

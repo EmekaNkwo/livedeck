@@ -1,0 +1,12 @@
+# Build context for deploy/web/Dockerfile: the studio, not the server.
+**/node_modules
+**/.git
+dist
+coverage
+test-results
+playwright-report
+server
+e2e
+**/.env
+**/.env.*
+!**/.env.example

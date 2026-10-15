@@ -11,7 +11,8 @@
 # or Kubernetes with a hostPort/NodePort — is the right home for this service.
 #
 # This blueprint is kept so the HTTP/WebSocket half still deploys here for
-# evaluation. For real broadcasts, run the container where UDP is reachable.
+# evaluation. For real broadcasts use deploy/docker-compose.yml on a host
+# where UDP is reachable; deploy/README.md walks through it.
 #
 # The studio itself is static and is not described here.
 

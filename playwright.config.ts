@@ -1,5 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
-import { RELAY_PORT } from './e2e/fixtures'
+import { DEPLOYED_BASE_URL, RELAY_PORT } from './e2e/fixtures'
 
 /**
  * Browser-level tests for the production workflow.
@@ -31,7 +31,9 @@ export default defineConfig({
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list']],
 
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: DEPLOYED_BASE_URL ?? 'http://localhost:5173',
+    // A local trial deployment serves a certificate from Caddy's own CA.
+    ignoreHTTPSErrors: DEPLOYED_BASE_URL !== null,
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -63,14 +65,10 @@ export default defineConfig({
   ],
 
   /*
-   * Two processes: the studio, and the signaling relay.
-   *
-   * The relay is only needed by `room.spec.ts`, but room-based signaling is the
-   * default transport — so starting it here is what makes the default path
-   * testable at all. `peer.spec.ts` seeds the manual transport explicitly and
-   * is unaffected by whether this is up.
+   * Two processes: the studio's dev server and the media server. Neither is
+   * started when LIVEDECK_BASE_URL points the suite at a deployment.
    */
-  webServer: [
+  webServer: DEPLOYED_BASE_URL ? [] : [
     {
       command: 'npm run dev',
       url: 'http://localhost:5173',
@@ -81,10 +79,10 @@ export default defineConfig({
     },
     {
       command: 'npm --prefix server run dev',
-      // `/healthz` is the relay's own endpoint, registered ahead of Next. Using
-      // it rather than `/` means a *different* process holding this port fails
-      // this check instead of being mistaken for the relay — which otherwise
-      // surfaces as a WebSocket that connects and then never upgrades.
+      // `/healthz` is the media server's own endpoint. Using it rather than
+      // `/` means a *different* process holding this port fails this check
+      // instead of being mistaken for the server — which otherwise surfaces
+      // as a WebSocket that connects and then never upgrades.
       url: `http://localhost:${RELAY_PORT}/healthz`,
       env: { PORT: RELAY_PORT },
       reuseExistingServer: !process.env.CI,
