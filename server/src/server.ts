@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import { createHttpHandler } from './http'
 import { readMediasoupConfig } from './mediasoup/config'
 import { createWorkerPool } from './mediasoup/worker-pool'
-import { createRoomManager } from './rooms/room-manager'
+import { createRoomManager, readRoomLimits } from './rooms/room-manager'
 import { createKeyService, readOrGenerateSecret } from './signaling/authorization'
 import { attachSignaling, normalizeOrigin } from './signaling/server'
 import { createTurnProvider, readTurnConfig } from './turn/credentials'
@@ -32,7 +32,7 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
 async function main(): Promise<void> {
   const mediasoupConfig = readMediasoupConfig(process.env)
   const pool = await createWorkerPool(mediasoupConfig, log)
-  const rooms = createRoomManager({ pool, config: mediasoupConfig, log })
+  const rooms = createRoomManager({ pool, config: mediasoupConfig, log, limits: readRoomLimits(process.env) })
 
   const { secret, generated } = readOrGenerateSecret(process.env)
   const keys = createKeyService(secret)

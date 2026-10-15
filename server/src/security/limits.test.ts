@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { IncomingMessage } from 'node:http'
 import { clientAddress, createConnectionLimiter } from './connection-limit'
 import { METHOD_CATEGORY, createRateLimiter } from './rate-limit'
+import { DEFAULT_ROOM_LIMITS, readRoomLimits } from '../rooms/room-manager'
 import { REQUEST_METHODS } from '../../../shared/protocol'
 
 describe('rate limiter', () => {
@@ -57,5 +58,15 @@ describe('connection limiter', () => {
     } as unknown as IncomingMessage
     expect(clientAddress(request, false)).toBe('10.0.0.1')
     expect(clientAddress(request, true)).toBe('203.0.113.9')
+  })
+})
+
+describe('room limits', () => {
+  it('defaults to room for twelve guests plus crew, and reads overrides', () => {
+    expect(DEFAULT_ROOM_LIMITS.maxPeersPerRoom).toBeGreaterThanOrEqual(13)
+    expect(readRoomLimits({})).toEqual(DEFAULT_ROOM_LIMITS)
+    expect(readRoomLimits({ ROOM_MAX_PEERS: '20', MAX_ROOMS: '50' })).toEqual({ maxPeersPerRoom: 20, maxRooms: 50 })
+    expect(readRoomLimits({ ROOM_MAX_PEERS: 'lots', MAX_ROOMS: '-1' })).toEqual(DEFAULT_ROOM_LIMITS)
+    expect(readRoomLimits({ ROOM_MAX_PEERS: '999' }).maxPeersPerRoom).toBe(64)
   })
 })

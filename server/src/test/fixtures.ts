@@ -10,10 +10,16 @@ import { createWorkerPool, type WorkerPool } from '../mediasoup/worker-pool'
  * between files that vitest may still overlap in setup.
  */
 
-let nextPort = 42000 + Math.floor(Math.random() * 10_000)
+/*
+ * Below 49152: Windows hands out 49152+ as ephemeral ports for outgoing
+ * connections, so a test port picked there can already be taken.
+ */
+const PORT_FLOOR = 41_000
+const PORT_SPAN = 7_000
+let nextPort = PORT_FLOOR + Math.floor(Math.random() * PORT_SPAN)
 
 export function testMediasoupConfig(): MediasoupConfig {
-  nextPort += 2
+  nextPort = PORT_FLOOR + ((nextPort - PORT_FLOOR + 2 + Math.floor(Math.random() * 50)) % PORT_SPAN)
   return {
     ...readMediasoupConfig({}),
     numWorkers: 1,
@@ -26,9 +32,19 @@ export function testMediasoupConfig(): MediasoupConfig {
 
 export const quietLog = (): void => {}
 
-export async function createTestPool(config = testMediasoupConfig()): Promise<{ pool: WorkerPool; config: MediasoupConfig }> {
-  const pool = await createWorkerPool(config, quietLog)
-  return { pool, config }
+/** A one-worker pool, retrying on another port if the first is taken. */
+export async function createTestPool(): Promise<{ pool: WorkerPool; config: MediasoupConfig }> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const config = testMediasoupConfig()
+    try {
+      const pool = await createWorkerPool(config, quietLog)
+      return { pool, config }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError
 }
 
 /** Minimal Opus parameters a router built from `MEDIA_CODECS` will accept. */

@@ -57,7 +57,16 @@ export async function createWorkerPool(
         port,
       })
     }
-    const webRtcServer = await worker.createWebRtcServer({ listenInfos })
+    let webRtcServer: types.WebRtcServer
+    try {
+      webRtcServer = await worker.createWebRtcServer({ listenInfos })
+    } catch (error) {
+      // A port already in use must not leave the worker process running, nor
+      // the ones started before it.
+      worker.close()
+      for (const slot of slots) slot.worker.close()
+      throw error
+    }
     const slot: WorkerSlot = { worker, webRtcServer, load: 0 }
     slots.push(slot)
 

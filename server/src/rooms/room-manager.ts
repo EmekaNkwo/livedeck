@@ -17,10 +17,23 @@ export type RoomLimits = {
 }
 
 export const DEFAULT_ROOM_LIMITS: RoomLimits = {
-  // Twelve participants is the product's stated ceiling. Viewers count too:
-  // each one is a full set of consumers on the router.
-  maxPeersPerRoom: 12,
+  // The product's target is a twelve-person studio. The cap counts every
+  // connection in the room — the director, a producer and any viewers are
+  // participants too — so it leaves headroom above twelve guests.
+  maxPeersPerRoom: 16,
   maxRooms: 200,
+}
+
+/** Room limits from the environment, falling back to the defaults. */
+export function readRoomLimits(env: Record<string, string | undefined>): RoomLimits {
+  const read = (value: string | undefined, fallback: number, max: number): number => {
+    const parsed = Number(value)
+    return Number.isInteger(parsed) && parsed >= 1 ? Math.min(parsed, max) : fallback
+  }
+  return {
+    maxPeersPerRoom: read(env.ROOM_MAX_PEERS, DEFAULT_ROOM_LIMITS.maxPeersPerRoom, 64),
+    maxRooms: read(env.MAX_ROOMS, DEFAULT_ROOM_LIMITS.maxRooms, 10_000),
+  }
 }
 
 export type RoomManager = {

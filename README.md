@@ -954,6 +954,7 @@ connections and workers.
 | `MEDIASOUP_ANNOUNCED_ADDRESS` | *unset* | The address clients can reach for media. Required for anything but localhost |
 | `MEDIASOUP_PORT` | `40000` | First media port; each worker takes the next one, UDP and TCP |
 | `MEDIASOUP_WORKERS` | CPUs, max 4 | mediasoup worker processes; rooms are placed on the least loaded |
+| `ROOM_MAX_PEERS` | `16` | Participants per room, every connection counted — twelve guests plus director and crew |
 | `CLOUDFLARE_TURN_KEY_ID` / `..._API_TOKEN` | *unset* | Cloudflare Realtime TURN |
 | `TURN_URLS` / `TURN_STATIC_AUTH_SECRET` | *unset* | A coturn-compatible relay using `use-auth-secret` |
 | `TURN_TTL_SECONDS` | `3600` | Credential lifetime, 600–7200 |
