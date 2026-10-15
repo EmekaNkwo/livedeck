@@ -77,14 +77,35 @@ function readInt(value: string | undefined, fallback: number, min: number, max: 
   return Math.min(max, Math.max(min, Math.floor(parsed)))
 }
 
+/**
+ * The address to advertise when none is configured.
+ *
+ * A wildcard bind announces nothing usable: an ICE candidate of 0.0.0.0 is
+ * one no browser can connect to, which presents as transports that never
+ * leave "connecting". On a laptop the machine's LAN address is the right
+ * answer (localhost also works through it); anything deployed must set
+ * MEDIASOUP_ANNOUNCED_ADDRESS to its public address.
+ */
+export function defaultAnnouncedAddress(): string {
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family === 'IPv4' && !entry.internal) return entry.address
+    }
+  }
+  return '127.0.0.1'
+}
+
 export function readMediasoupConfig(env: Record<string, string | undefined>): MediasoupConfig {
   const cpuCount = os.cpus().length || 1
   const logLevel = LOG_LEVELS.find((level) => level === env.MEDIASOUP_LOG_LEVEL) ?? 'warn'
+  const listenIp = env.MEDIASOUP_LISTEN_IP?.trim() || '0.0.0.0'
+  const configuredAnnounce = env.MEDIASOUP_ANNOUNCED_ADDRESS?.trim() || undefined
   return {
     numWorkers: readInt(env.MEDIASOUP_WORKERS, Math.min(cpuCount, 4), 1, 32),
     logLevel,
-    listenIp: env.MEDIASOUP_LISTEN_IP?.trim() || '0.0.0.0',
-    announcedAddress: env.MEDIASOUP_ANNOUNCED_ADDRESS?.trim() || undefined,
+    listenIp,
+    announcedAddress:
+      configuredAnnounce ?? (listenIp === '0.0.0.0' || listenIp === '::' ? defaultAnnouncedAddress() : undefined),
     port: readInt(env.MEDIASOUP_PORT, 40000, 1024, 65535),
     enableUdp: env.MEDIASOUP_ENABLE_UDP !== 'false',
     enableTcp: env.MEDIASOUP_ENABLE_TCP !== 'false',

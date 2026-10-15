@@ -6,14 +6,14 @@ live, and record the finished program — with no installation and no accounts.
 
 The joining workflow follows a **meeting tool**: you open a control room, copy
 one room link, and send it. Whoever opens it sets a name, clicks **Join room**,
-and appears in your control room — nothing to paste back. Introducing the two
-sides needs a signaling relay, which ships in [`server/`](server/) and is the
-default.
+and appears in your control room — nothing to paste back.
 
-Everything *except* joining works with no backend at all, and a
-zero-infrastructure joining path is still supported: in **Manual** mode the
-invite link carries the connection details itself. See
-[Signaling transports](#signaling-transports).
+Participants' audio and video go through a **media server** (an SFU built on
+[mediasoup](https://mediasoup.org)) that ships in [`server/`](server/). Each
+participant sends its camera once and receives everyone else from the server,
+which is what lets a room hold a dozen people. The server also decides who may
+control whom. Everything *except* joining a room — capture, scenes, mixing,
+recording — works with no server at all. See [The media server](#the-media-server).
 
 The production engine underneath follows **OBS**: a logical canvas, saved scenes
 you cut between, a real audio mixer, and a recorder that captures the composed
@@ -53,7 +53,15 @@ Camera / Screen / Guest sources
       └──────────▶ MediaRecorder
                         │
                         ▼
-              Local recording (IndexedDB)
+              Local recording (IndexedDB, chunked)
+```
+
+```
+Guest A ─┐                       ┌─ Guest A hears B + C, never A
+Guest B ─┼──▶  media server  ───┼─ Guest B hears A + C
+Guest C ─┘   (mediasoup SFU)     └─ Director receives A, B, C
+                   │
+          authorizes every control command
 ```
 
 ---
@@ -65,7 +73,6 @@ Camera / Screen / Guest sources
 - [Browser requirements](#browser-requirements)
 - [Rooms and roles](#rooms-and-roles)
 - [Solo links share one feed](#solo-links-share-one-feed)
-- [Invite links (Manual mode)](#invite-links-manual-mode)
 - [URL parameters](#url-parameters)
 - [The director is not in the room](#the-director-is-not-in-the-room)
 - [Nothing starts by itself](#nothing-starts-by-itself)
@@ -83,9 +90,7 @@ Camera / Screen / Guest sources
 - [Scene transitions](#scene-transitions)
 - [The audio graph](#the-audio-graph)
 - [The recording pipeline](#the-recording-pipeline)
-- [WebRTC and signaling](#webrtc-and-signaling)
-- [Signaling transports](#signaling-transports)
-- [Deploying the relay with Docker](#deploying-the-relay-with-docker)
+- [The media server](#the-media-server)
 - [Persistence](#persistence)
 - [Performance decisions](#performance-decisions)
 - [Accessibility](#accessibility)
@@ -105,7 +110,7 @@ npm run dev                            # studio  -> http://localhost:5173
 
 # in a second terminal — needed for guests to join by room link
 npm install --prefix server
-npm --prefix server run dev            # relay   -> http://localhost:3001
+npm --prefix server run dev            # media server -> http://localhost:3001
 ```
 
 Name a room (or click **New code**) and click **Open director**. Start your
@@ -113,23 +118,21 @@ camera from the Sources tab, then copy the room link from the Guests tab and
 send it. Your guest opens it, types a name, clicks **Join room**, and appears in
 your control room.
 
-Without the relay running, the Guests panel says so plainly and points at
-Settings › Signaling › **Manual** — which needs nothing running, at the cost of
-one link per guest and a reply to paste back.
+Without the media server running, the Guests panel says so plainly. Nothing
+else depends on it: capture, scenes, the mixer and the recorder all work alone.
 
 Media capture requires a **secure context**. `localhost` counts as one, so plain
 HTTP works in development. Deploying over `http://` to any other host will stop
 `getUserMedia` from working at all — the app detects this and says so rather
 than blaming permissions.
 
-There are no API keys and no accounts. Environment variables are all optional —
-see [`.env.example`](.env.example) for the studio (relay address, TURN servers)
-and [`server/.env.example`](server/.env.example) for the relay (port, allowed
-origins).
+There are no API keys and no accounts. Environment variables are all optional
+on a laptop — see [`.env.example`](.env.example) for the studio (server
+address) and [`server/.env.example`](server/.env.example) for the server
+(ports, allowed origins, room-key secret, announced address, TURN).
 
-**Media never touches a server.** The relay forwards the text of the handshake
-and nothing else; audio and video go directly between browsers in both
-transports.
+**Media goes through the server and is never stored there.** The SFU forwards
+RTP between participants; it does not decode, mix or record anything.
 
 ## Scripts
 
@@ -189,8 +192,8 @@ view has no interface at all.
 
 | Route | Role | What it is |
 | --- | --- | --- |
-| `/director/:room` | Director | The control room: guest tiles, scenes, mixer, recorder, invite links |
-| `/push/:room` | Guest | A sender — camera and microphone, and the one link to send back |
+| `/director/:room` | Director | The control room: guest tiles, scenes, mixer, recorder, room links |
+| `/push/:room` | Guest | A sender — camera, microphone, screen — and a view of the other guests |
 | `/scene/:room` | Scene output | The composed program with zero chrome, at the logical canvas size |
 | `/solo/:room/:sourceId` | Solo | One feed, uncomposed, for a downstream tool to lay out itself |
 
@@ -198,27 +201,45 @@ Navigating to a room creates it; there is no separate "new project" step.
 
 ### Joining a room
 
-With the relay running — the default — a room name **is** enough to connect: the
-guest opens `/push/:room`, sets a display name, and clicks **Join room**. Only
-the director offers; if both sides offered on sight they would glare and produce
-two half-negotiated peers with no media.
+A room name **is** enough to connect: the guest opens `/push/:room`, sets a
+display name, and clicks **Join room**. The server introduces them to everyone
+in the room; there is no offer to carry and nothing to paste back.
 
 Joining is a deliberate click rather than something that happens on page load,
 for one reason: a guest's camera and microphone should not enter someone else's
-production because they opened a URL. Capture starts with that click too, which
-is also the user gesture browsers require before an `AudioContext` will run.
+production because they opened a URL. The click is also the user gesture
+browsers require before an `AudioContext` will run.
 
-In **Manual** mode there is no server to match peers, so a room name alone
-cannot connect anybody — the invite link establishes the connection instead,
-and the guest page shows no join control because there is nothing to join.
+### Roles are decided by the server
+
+Four roles exist, and the server assigns one at join from the **room key** the
+client presents — never from anything the client claims about itself:
+
+| Role | Gets it by | May |
+| --- | --- | --- |
+| director | opening an empty room first, or the director key | everything: publish the program, control, cue, rename, kick, read the keys |
+| producer | the producer key (`/push/:room?key=…`) | mute, cue and rename guests; never on-air, never kick, never touch the director |
+| guest | nothing — the default | publish own media, mute itself, see and hear the others |
+| viewer | asking for it | receive only |
+
+The first control room to open an **empty** room claims it and stores the
+director key in that browser, so a reload keeps the role. Once a room has
+people in it, only the key grants director. The Guests tab offers a guest link
+and a producer link; treat the producer link like a password.
+
+A request to control another participant names only the target. The sender is
+whoever owns the socket, and the server checks that sender's role against the
+capability table in [`shared/authorization.ts`](shared/authorization.ts)
+before forwarding. A guest's browser has no button to mute another guest, and
+a browser that sends the command anyway gets `forbidden`.
 
 ### A room name is not access control
 
-A room name authenticates nothing and authorizes nothing. With the relay
-running this has teeth: anyone who can reach it and guesses the name **will**
-join that room and be offered a connection. There is no account, no token and
-no access check — none of which could exist without a backend that owns
-identity, which this is not. The UI says so wherever a room name appears.
+A room name authenticates nothing: anyone who can reach the server and guesses
+the name joins **as a guest**. That is deliberate — guests should not need
+accounts. What a guest can *do* is bounded by the role table above, and the
+keys are what gate the roles. If guessing matters, set `ALLOWED_ORIGINS` and
+run the server where only your studio can reach it.
 
 ### The scene route is the OBS integration
 
@@ -268,50 +289,6 @@ because the publisher declares the m-lines up front and attaches the track with
 A solo link is **not** access control, exactly like a room name: anyone holding
 it can open that feed while the control room is publishing.
 
-## Invite links (Manual mode)
-
-Everything in this section describes the **Manual** transport — the
-zero-infrastructure path. With the relay there is one reusable room link with no
-payload in it, so none of this applies.
-
-With no server to match peers by room, the link **carries the offer itself**:
-
-```
-https://host/push/sunday-service#i=LD1z:q1Z2…
-                └─ role ┘└─ room ┘└─ the offer ┘
-```
-
-No guest name is baked in. A name in a link is wrong the moment it is
-forwarded, and guests name themselves on the join screen — so the director
-never types it in either transport.
-
-The guest opens it, their browser already has everything it needs, and it
-answers automatically. They get one link back for the director to apply.
-
-Three decisions worth stating:
-
-- **The payload is in the fragment, after `#`.** Fragments are never sent to a
-  server — not in the request line, not in logs, not in a `Referer`. So even on
-  someone else's static host, the offer never reaches them. A query string would
-  leak it into access logs.
-- **It is DEFLATE-compressed** via `CompressionStream`, because an SDP with a
-  full candidate set runs to several kilobytes and base64 adds a third on top.
-  SDP is extremely repetitive, so this typically takes 60–75% off. Browsers
-  without the API fall back to uncompressed transparently.
-- **The fragment is cleared once consumed**, with `replaceState`, so a reload
-  cannot re-apply a stale offer and it is not reachable with the back button.
-
-A pasted answer is accepted as a full link, a bare token, or raw JSON, because
-people paste all three. Each failure mode gets its own message: a truncated
-link, an answer pasted where an invite belongs, or text that is not a LiveDeck
-payload at all.
-
-### Still one manual step
-
-The guest's answer has to come back by hand — no server can carry it. It is
-presented as a link they can send rather than a blob to paste into the right
-box, but it is a step, and the UI does not pretend otherwise.
-
 ## URL parameters
 
 Configuring a session through the link, as VDO.Ninja does. Every parameter below
@@ -347,19 +324,15 @@ structure scenes out of what the room sends it; the material comes from the
 participants. There is no screen capture in the control room at all — no
 button, no command, no shortcut.
 
-A guest shares from the guest view, and it **replaces their camera** rather
-than joining it. One outgoing video track means no renegotiation with every
-peer in the mesh when a share starts, and no doubling of that guest's upload
-for its duration. The trade is explicit and is the one every meeting tool
-makes: while sharing, that guest's camera is not going out — to anyone,
-including the director's program, where their feed becomes the screen.
+A guest shares from the guest view, and the screen goes out **alongside**
+their camera as its own producer (with its audio as a second one, when the
+browser provided a track). Receivers get both: the camera stays in the grid,
+the screen takes the featured region, and the control room gets a separate
+*screen* source it can place independently of the face.
 
-Nothing in WebRTC says what a track is *of* — a shared document and a face
-arrive as the same kind of video — so the sharer reports it over the control
-channel (`{type: 'sharing'}`), validated as strictly as every other message
-because it is remote input that drives layout. Receivers give it the
-screen region. It is re-announced whenever the peer set changes, or somebody
-joining mid-share would see nothing being shared at all.
+Every producer carries its *source* (`camera`, `screen`, `screen-audio`…) in
+the signaling, so nobody has to guess what a video track is of, and a
+participant joining mid-share receives the screen like any other producer.
 
 The shared screen gets **its own region** above the participant grid, never a
 cell inside it. A screen is a different kind of thing from a face: a different
@@ -393,10 +366,9 @@ production model nothing renders would only add mixer channels duplicating
 audio that is already playing through the participant's own video element. Only
 a control room does that.
 
-This is a **full mesh**, which is what makes it work without a server-side
-mixer — and also what caps the room size: every guest encodes its camera once
-per peer, so cost grows with the square of the room. See
-[Known limitations](#known-limitations).
+Every guest publishes once to the media server and receives the others from
+it, so a room of twelve costs each laptop one encode and one upload. See
+[The media server](#the-media-server).
 
 ### The director is not in the room
 
@@ -406,14 +378,14 @@ used to send its composed program to each of them, which encoded the canvas
 once per guest for a feed nobody needed and put a black rectangle (an empty
 program is a black canvas) in the middle of a call the director is not part of.
 
-The peer connection stays, because it carries the guests' media *to* the
-control room and the control channel back — remote mute, cue, on-air tally.
+The control room still has a session with the media server, because that is
+how the guests' media reaches it and how its commands — remote mute, cue,
+on-air tally — reach them, authorized on the way.
 
-A participant is somebody the **room roster** announced. Identity comes from
-the relay, not from media: an SDP envelope does not carry the sender's name or
-role, so a stream from a peer the room never announced is not rendered as a
-person. Without that rule the control room's own empty m-lines appeared as a
-phantom guest with no video.
+A participant is somebody the **server's roster** announced, with the label
+and role the server holds for them. Media arrives tagged with the producer's
+participant id, so a stream can never appear as a person the room did not
+announce.
 
 ### Nothing starts by itself
 
@@ -424,15 +396,9 @@ somebody. The `AudioContext` is still prepared on the join click, because
 browsers will not start one without a gesture, but preparing a mixer captures
 nothing.
 
-Turning either on later works, which is less obvious than it sounds. Nothing
-here renegotiates — manual signaling could not without another copy/paste
-round, and in a mesh it would mean a fresh offer to every peer — so the m-lines
-present at offer time are all there will ever be. Every connection therefore
-declares **send-capable** audio and video m-lines up front, even with nothing
-to send, and a track that appears later is attached with `replaceTrack`. They
-used to be `recvonly`, which left no sender to put a later track into: a guest
-who joined with their camera off stayed invisible for the whole call however
-many times they pressed the button, and a screen share reached nobody.
+Turning either on later simply publishes a new producer; a device switch
+replaces the track on the existing one. Nothing is renegotiated with other
+participants, because nobody is connected to them — only to the server.
 
 ### The guest view is a meeting, not a studio
 
@@ -530,11 +496,8 @@ and recorded to a file. Nothing here needs a second participant.
 
 ### Peer Connection Mode
 
-Real browser-to-browser media over WebRTC. Guests join by room link with the
-relay running, or through the
-[invite-link workflow](#invite-links-manual-mode) in Manual mode. See
-[WebRTC and signaling](#webrtc-and-signaling) for the ICE details and the real
-limitations.
+Real media over WebRTC, through the media server. Guests join by room link.
+See [The media server](#the-media-server) for how it works and what it needs.
 
 There is deliberately **no mock signaling adapter that pretends to connect two
 devices**. An in-memory event bus cannot carry SDP between browsers, and
@@ -881,371 +844,166 @@ browser will not let a file be finalized during `beforeunload`, so the honest
 thing is to warn that the recording will be lost rather than pretend it can be
 saved.
 
-## WebRTC and signaling
-
-### Architecture
+## The media server
 
 ```
-PeerConnectionManager   owns RTCPeerConnection lifecycle; no UI, no store, no transport
-ControlChannel          the director ↔ guest command path (RTCDataChannel)
-SignalingAdapter        the transport seam (interface)
-  ├─ ManualSignalingAdapter       out-of-band exchange, no infrastructure (default)
-  └─ WebSocketSignalingAdapter    rooms + trickle ICE via the optional relay
-invite-link             encodes an envelope into a shareable URL fragment
-ICE configuration       STUN/TURN parsing, gathering, connectivity assessment
-Remote media handler    binds incoming tracks to guest sources
-Connection diagnostics  real getStats() output
+Browser                                   server/
+  MediaSession ── WebSocket /signal ──▶  signaling handlers ── RoomManager
+   ├ send transport  ──── RTP ─────────▶  mediasoup Router (one per room)
+   │   mic / camera / screen producers      ├ WebRtcTransport per participant & direction
+   └ recv transport  ◀─── RTP ──────────    ├ Producer per published track
+       one consumer per remote producer     └ Consumer per (participant, producer)
 ```
 
-Every transport that could ever be used — manual exchange, a WebSocket service,
-a QR code, `BroadcastChannel` between tabs — implements one `SignalingAdapter`
-interface. The studio UI and the peer manager know only about that type, plus
-the capability flags it advertises:
+### Why an SFU
 
-| Flag | Meaning |
-| --- | --- |
-| `crossDevice` | Can reach a genuinely separate device |
-| `requiresManualExchange` | A human has to carry the handshake |
-| `supportsRooms` | Peers find each other by name |
-| `supportsTrickleIce` | Candidates can be sent incrementally |
+In a mesh every participant encodes its camera once *per peer* and uploads all
+of them, so a twelve-person room is twelve encodes and eleven uploads on every
+laptop. With a Selective Forwarding Unit each participant encodes once, sends
+once, and the server forwards; the cost moves to a machine built for it. The
+server never decodes: it forwards RTP packets, picks simulcast layers per
+receiver, and that is all.
 
-The UI reads these rather than checking which adapter is installed, which is
-why switching transports changes the Guests panel from the copy-a-link flow to
-a room status view instead of leaving dead controls on screen.
+### The protocol
 
-### The workflow
-
-```
-Director creates offer → ICE gathering completes → link generated
-       ↓
-Guest opens the link → offer applied automatically → answers → gets a link back
-       ↓
-Director applies the answer → ICE connectivity checks → connected
-       ↓
-Control channel opens → remote mute, cue and on-air tally become available
-```
-
-The data channel is created by the **offering** side, so its m-line is in the
-offer and no second negotiation round is needed — which this signaling could not
-perform without another link exchange.
-
-### Vanilla ICE, and why
-
-This applies to the **manual** transport only. Manual exchange has **no channel
-for incremental (trickle) ICE candidates** — the user would have to copy a fresh
-code every time one appeared. So LiveDeck waits for gathering to complete and
-exports a single SDP with every candidate already embedded.
-
-The server transport does not have this constraint: a live socket can carry
-candidates as they are discovered, so `WebSocketSignalingAdapter` advertises
-`supportsTrickleIce` and the peer manager sends each one immediately. Inbound
-candidates that arrive before `setRemoteDescription` are buffered and flushed
-after it, since applying one to a connection with no remote description throws.
-
-The trade-offs of the vanilla path, which the UI states before you invest in it:
-
-- Setup is slower — a second or two spent gathering.
-- Gathering **times out after 5s** rather than hanging, because a
-  configured-but-unreachable TURN server can keep `iceGatheringState` at
-  `gathering` indefinitely. A partial candidate set is still worth trying, and
-  the UI says the set may be incomplete.
-- **A STUN-only configuration discovers no relay candidates.** Two peers behind
-  symmetric NAT, or behind a firewall that blocks UDP, will gather candidates,
-  exchange them, fail every connectivity check, and land in `failed`. That is a
-  real network limitation, not a bug, and traversing it requires a TURN relay.
-  The supported fix is [Cloudflare Realtime TURN](#cloudflare-realtime-turn),
-  minted by the relay; a static server also works in **Settings → ICE servers**
-  as `turn:host:port|username:password`. This one is **not** solved by signaling
-  alone: media is peer-to-peer in both transports, so the same NAT limits apply.
-
-After gathering, the candidate set is assessed and reported in plain language:
-relay present → good; public (srflx) present → works on most home and office
-networks, with the symmetric-NAT caveat spelled out; host-only → same network
-only; none → will not connect.
-
-### Cloudflare Realtime TURN
-
-The supported way to get a relay. The signaling server mints **short-lived**
-TURN credentials from Cloudflare and serves them to the studio; the studio puts
-them in front of its STUN servers when it builds a peer connection.
-
-**Setup.** Cloudflare dashboard → Realtime → TURN → create a key. Put the two
-values in `server/.env`:
-
-```bash
-CLOUDFLARE_TURN_KEY_ID=<the "Turn Token ID">
-CLOUDFLARE_TURN_API_TOKEN=<shown once, at creation>
-# Optional. Seconds, default 86400, range 600–172800.
-CLOUDFLARE_TURN_TTL_SECONDS=86400
-```
-
-Nothing to configure in the studio. The credential endpoint is **derived** from
-the signaling relay address, because they are the same process — wherever
-`/signal` is reachable, `/ice-servers` is too. `VITE_ICE_SERVERS_URL` overrides
-that for the one deployment where credentials come from somewhere else.
-
-Restart the relay and check the startup line, which states which mode TURN is
-in. A typo in the key id is otherwise indistinguishable from no configuration
-at all, and both look identical from the browser: no relay candidates.
+One WebSocket per participant carries requests (answered by id) and
+notifications. Every message is a Zod schema in
+[`shared/protocol.ts`](shared/protocol.ts), compiled into both halves and
+validated on both ends: the server does not trust browsers, and the browser
+does not trust the server.
 
 ```
-[livedeck-signaling] TURN: Cloudflare key 2f9c1ab4…, ttl 86400s, served at GET /ice-servers
-[livedeck-signaling] TURN: not configured (STUN only). Set CLOUDFLARE_TURN_KEY_ID and …
+join, getRouterRtpCapabilities, createWebRtcTransport, connectWebRtcTransport,
+restartIce, produce, consume, resumeConsumer, pauseConsumer, closeConsumer,
+setConsumerLayers, pauseProducer, resumeProducer, closeProducer, updateState,
+control, getRoomKeys, leave, ping
 ```
 
-**Why the token lives on the server.** The Cloudflare API token can mint
-credentials for your account indefinitely. A `VITE_*` variable is compiled into
-the browser bundle, so putting it there publishes it to anyone who opens
-devtools — your relay bandwidth, your bill. The token stays in the relay
-process; the browser only ever receives a username/credential pair that expires
-on its own. This is the one piece of LiveDeck that genuinely needs a server.
+No request carries the sender's id or role; the server knows which socket sent
+it. `join` carries an optional room key, which is how roles are earned.
 
-**What it costs in latency.** Credentials are fetched on the path that precedes
-`new RTCPeerConnection`, because ICE servers are fixed at construction and
-WebRTC offers no way to add one to a live connection. That is one HTTP request,
-once: `turn-credentials.ts` caches the grant until five minutes before expiry,
-and `turn.ts` caches it server-side until ten minutes before, so a twelve-guest
-room is one call to Cloudflare rather than twelve. Simultaneous joins on a cold
-cache share a single in-flight request on both sides.
+### The join sequence
 
-**What happens when it breaks.** Every failure path degrades to STUN-only
-rather than throwing, because a lost relay is a weaker connection while a thrown
-error would abort handshakes that never needed one. The operator gets a toast
-naming the cause — a 403 says to check the token specifically, since a rotated
-token is the common case — and the toast is latched so a down relay raises it
-once rather than once per guest per attempt. A relay with **no** TURN key
-configured is silent: that is the project's default, not a fault, and
-`describeIceFailure` already explains it at the point a connection actually
-fails.
+1. Connect the socket.
+2. `join` — the server answers with the participant's id, role, the roster,
+   every producer already in the room, short-lived ICE servers and the
+   router's RTP capabilities.
+3. Load the mediasoup `Device`.
+4. Create the send transport (not for viewers) and the receive transport.
+5. Consume every producer the room already has; each consumer is created
+   paused and resumed once its track is wired.
+6. Publish whatever local tracks were requested, before or after joining.
 
-Credentials are passed to `buildPeerConfiguration` as structured
-`IceServerConfig` objects rather than through the
-`turn:host:port|username:password` settings syntax. That format splits the
-credential pair on the first `:`, and a generated Cloudflare username or
-base64 credential may contain one — routing a secret through it would truncate
-it and produce a 401 that looks like a wrong token.
+Transports connect lazily on the first produce or consume.
+
+### Quality
+
+Cameras are sent as three simulcast layers (quarter, half, full), screens as
+one sharp low-rate layer with `contentHint: 'detail'`, audio as Opus with DTX
+on microphones. A quality controller samples both transports every two seconds
+and moves a downlink and an uplink tier through a hysteresis machine — three
+bad samples to step down, ten good ones to step up — selecting the simulcast
+layer the server forwards for every remote video and capping the camera's
+layers. A single lost burst never changes the picture.
+
+### Mix-minus
+
+A participant never consumes its own producers, and the server refuses a
+request to. So each guest hears everyone *but themselves*, by construction
+rather than by subtraction, and the director's program receives everyone.
+
+### Reconnection
+
+The socket reconnects with backoff. On reconnect the session re-joins with a
+**resume token**; if the server still holds the participant (it keeps a
+dropped participant's transports for thirty seconds), ICE is restarted on both
+transports and local producers are kept. If it does not, the session rebuilds
+from scratch: new transports, local tracks re-published, remote producers
+re-consumed. Identity is whatever the server reports, so the director keeps
+one tile per person either way. Every step has a timeout; nothing sits in
+"connecting" forever. The network coming back or the tab becoming visible
+triggers a check immediately rather than at the next heartbeat.
 
 ### Honest status reporting
 
-A peer becomes `'connected'` **only** when `RTCPeerConnection.connectionState`
-reports `connected`. Creating an offer, exchanging codes, or having a guest row
-in the list never produces a connected status.
+A participant is `connected` only when the studio's receive transport is
+connected and the server lists them. Whether their media is arriving is a
+separate fact, shown separately. Diagnostics render every unavailable metric
+as an em dash instead of inventing numbers.
 
-Guest identity and transport state are separate maps in `guestStore`. **A guest
-existing in the list says nothing about whether a connection succeeded.**
-
-- `disconnected` is reported as *reconnecting*, not failed — ICE often recovers.
-- `failed` explains itself in terms of NAT and firewalls.
-- A guest with no peer yet reports exactly that, and diagnostics renders every
-  unavailable metric as an em dash instead of inventing RTT and bitrate numbers.
-
-Connection codes are untrusted clipboard input and are validated structurally
-before anything reaches `setRemoteDescription`: wrong version, truncated SDP
-(the most common real mistake), missing peer id, and wrong direction ("that is
-an answer code — paste the host's offer here instead") each get a specific,
-actionable message.
-
-Codes are base64 with an `LD1:` prefix so they survive chat clients and email,
-which happily reflow raw multi-line SDP. Clipboard writes can fail; the copy
-button reports failure honestly and a selectable textarea is always available
-as a manual fallback.
-
-The host sends its **program output** to guests — the composed canvas plus the
-mixed audio — which is what makes this a production feed rather than a webcam
-call. `replaceTrack` is used for source swaps so no renegotiation round is
-needed, which manual signaling could not perform without another copy/paste.
-
-### Sessions are not access control
-
-A session ID is a short, human-shareable label for coordinating a production. It
-**authenticates nothing and authorizes nothing** — there is no server to check it
-against. Knowing an ID grants no access to anybody's media; media only ever flows
-over a peer connection both sides explicitly completed. The UI says this wherever
-an ID appears.
-
-## Signaling transports
-
-Two transports ship. The choice is in **Settings → Signaling**, and it changes
-only *how the two sides find each other* — media is peer-to-peer either way, and
-no server ever sees a frame of video.
-
-| | Signaling server (default) | Manual |
-| --- | --- | --- |
-| Infrastructure | A Node process you run | None |
-| Guest joins by | Opening the room link and clicking Join | Opening a link that carries the offer |
-| The link | One, reusable, short | One per guest, a few kilobytes |
-| Answer comes back | Automatically | By hand |
-| ICE | Trickle — candidates stream | Vanilla — gathers fully first |
-| Time to connect | Typically under a second | A second or two of gathering, plus the human round-trip |
-| Works on static hosting | No — needs the relay reachable | Yes |
-
-**Manual remains fully supported**, and is one setting away in
-Settings › Signaling. The original constraint of this project was to need no
-backend, and that path is unchanged: nothing is transmitted to anybody, because
-the offer rides in the URL fragment, which browsers never send to a server.
-
-The default changed because the manual flow has one genuinely awkward step that
-no amount of frontend cleverness removes — see below.
-
-### Why a server at all
-
-The manual flow has one genuinely awkward step: the guest's answer has to travel
-back to the director by hand (see limitation 2 below). No amount of frontend
-cleverness removes it — returning an answer requires something both parties can
-reach. The relay is that something, and nothing more.
-
-### What the relay does and does not do
-
-It does:
-
-- Keep a map of room name → connected peers, in memory only.
-- Forward `offer`, `answer` and `candidate` messages between peers **in the same
-  room**, inferring the sender from the connection rather than trusting a claim
-  in the message.
-- Announce arrivals and departures so the director knows who to offer to.
-- Rate-limit each peer, cap peers per room and rooms per server, and drop
-  sockets that stop answering heartbeats.
-
-It does not:
-
-- Touch media. Audio and video never pass through it.
-- Persist anything. There is no database; restarting it empties every room.
-- Authenticate anyone. **A room name is not a password** — see below.
-
-### Running it
+### Running the server
 
 ```bash
 cd server
 npm install
-npm run dev          # http://localhost:3001, relay on ws://localhost:3001/signal
+npm run dev          # http://localhost:3001, signaling on ws://localhost:3001/signal
 ```
 
-That is all — the studio already points there. The address field is **blank by
-default and resolved**, not hardcoded:
-
-1. `VITE_SIGNALING_URL`, if set at build time.
-2. `ws://<hostname>:3001` when the page URL carries a port, i.e. development.
-3. The page's own origin otherwise, for a deployment behind a proxy that also
-   fronts `/signal`.
-
-Override it in **Settings → Signaling** for a relay hosted anywhere else.
-`/healthz` reports room counts and is the reliable way to confirm the relay —
-rather than some other process — is what is answering that port.
+The studio already points there. The address is blank by default and resolved:
+`VITE_SIGNALING_URL` if set at build time, else `ws://<hostname>:3001` when the
+page URL carries a port (development), else the page's own origin. Override it
+in **Settings → Media server**. `/healthz` reports rooms, participants,
+connections and workers.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3001` | HTTP and WebSocket port |
-| `HOST` | `0.0.0.0` | Interface to bind (not `HOSTNAME` — Windows pre-sets that to the machine name) |
-| `ALLOWED_ORIGINS` | *unset* | Comma-separated origins allowed to connect |
+| `HOST` | `0.0.0.0` | Interface to bind |
+| `ALLOWED_ORIGINS` | *unset* | Comma-separated browser origins allowed to connect; unset means any, and the server warns |
+| `ROOM_KEY_SECRET` | *generated* | Director and producer keys are HMACs of the room name with this. Unset, keys change on every restart and the server warns |
+| `MEDIASOUP_ANNOUNCED_ADDRESS` | *unset* | The address clients can reach for media. Required for anything but localhost |
+| `MEDIASOUP_PORT` | `40000` | First media port; each worker takes the next one, UDP and TCP |
+| `MEDIASOUP_WORKERS` | CPUs, max 4 | mediasoup worker processes; rooms are placed on the least loaded |
+| `CLOUDFLARE_TURN_KEY_ID` / `..._API_TOKEN` | *unset* | Cloudflare Realtime TURN |
+| `TURN_URLS` / `TURN_STATIC_AUTH_SECRET` | *unset* | A coturn-compatible relay using `use-auth-secret` |
+| `TURN_TTL_SECONDS` | `3600` | Credential lifetime, 600–7200 |
 
-`ALLOWED_ORIGINS` is **unset by default and the server warns about it on
-startup**, because an unset allow-list accepts connections from any page on the
-internet. That is convenient on a laptop and wrong anywhere else.
+### TURN
 
-The wire protocol lives in [`shared/signaling-protocol.ts`](shared/signaling-protocol.ts),
-imported by both the browser client and the server so the two cannot drift. Both
-sides validate every message; the server is untrusted input to the client just as
-much as the reverse.
+Media now terminates at the server, so a participant only has to reach *it*.
+Most networks can, over UDP; where UDP is blocked the transport falls back to
+TCP. A participant behind a NAT that blocks both still needs a TURN relay, and
+the studio says so when ICE fails.
 
-### It will not run on Vercel's serverless runtime
+Credentials are minted **per session**, delivered only inside the
+authenticated join response, and expire after `TURN_TTL_SECONDS`. There is no
+endpoint that hands a credential to whoever asks; the previous design served
+one 24-hour credential to any request, which was a free relay for anyone who
+found the URL.
 
-This is worth stating plainly because the stack suggests otherwise. A WebSocket
-relay needs a long-lived process holding connections in memory. Serverless
-functions are short-lived and individually isolated, and a Next.js route handler
-cannot access the HTTP server's `upgrade` event at all — which is why
-[`server/src/server.ts`](server/src/server.ts) starts Next *programmatically*
-inside a plain Node `http` server that owns that event itself.
+### Hardening
 
-So it needs somewhere that runs a persistent process: a VPS, a container,
-Fly.io, Railway, Render, a Node host. The static studio can still be deployed
-anywhere; only the relay has this requirement.
+- WebSocket frames are capped at 256 KB (`maxPayload`), matching the largest
+  SDP the protocol accepts.
+- Per-address and total connection caps at upgrade.
+- A socket that has not joined within fifteen seconds is closed; dead sockets
+  are reaped by a thirty-second heartbeat.
+- Rate limiting is a token bucket **per category** — room operations, media
+  signaling, ICE restarts, control, keepalive — so a burst of consumer
+  requests on join cannot starve an ICE restart during a network change. A
+  refused request is answered with `rate-limited`, never dropped.
+- The protocol has no field for a client to claim an identity or role.
 
-Scaling past one process would need shared room state (Redis, say) and sticky
-sessions. That is out of scope here, and the in-memory limits are small enough
-to be honest about: 12 peers per room, 500 rooms.
+### Deployment
 
-### A room name is not a password
-
-Restating what [Rooms and roles](#a-room-name-is-not-access-control) says,
-because with a relay in play it has more teeth: anyone who can reach it and
-guesses a room name **will** join that room and be offered a connection.
-
-Treat the room name as a rendezvous label, not a credential. **New code** on the
-landing page generates one in the `abc-defg-hij` shape meeting tools use —
-roughly 47 bits, which makes it impractical to guess, but that is obscurity, not
-access control. If it matters, run the relay on a network you control and set
-`ALLOWED_ORIGINS`. The UI states this wherever a room name is shown.
-
-### Deploying the relay with Docker
-
-[`server/Dockerfile`](server/Dockerfile) builds it, and
-[`render.yaml`](render.yaml) is a Render blueprint for it.
-
-**The build context is the repository root, not `server/`.** This is the one
-thing that is easy to get wrong: `server/src/signaling.ts` imports
-`../../shared/signaling-protocol`, because the wire protocol is compiled into
-both the browser client and the server so the two cannot drift. A context of
-`server/` cannot see half of its own source.
+The server holds rooms and routers in one process's memory and needs a
+reachable UDP (and TCP) media port. That means a container or VM with those
+ports published — Fly.io, a VPS, Kubernetes with a host port — and
+`MEDIASOUP_ANNOUNCED_ADDRESS` set to what clients can reach. It does not run on
+a serverless platform, and Render's web services publish only one HTTP port,
+so on Render media is limited to TCP through a TURN relay; see
+[`render.yaml`](render.yaml). Scaling past one process needs a room-to-instance
+mapping first.
 
 ```bash
 # from the repository root
-docker build -f server/Dockerfile -t livedeck-signaling .
-docker run --rm -p 3001:3001 -e ALLOWED_ORIGINS=http://localhost:5173 \
-  livedeck-signaling
+docker build -f server/Dockerfile -t livedeck-server .
+docker run --rm -p 3001:3001 -p 40000-40003:40000-40003/udp -p 40000-40003:40000-40003/tcp \
+  -e ALLOWED_ORIGINS=https://studio.example.com \
+  -e MEDIASOUP_ANNOUNCED_ADDRESS=203.0.113.10 \
+  -e ROOM_KEY_SECRET=$(openssl rand -base64 32) \
+  livedeck-server
 ```
-
-On Render, as a **Docker** web service — or just apply the blueprint:
-
-| Setting | Value |
-| --- | --- |
-| **Root Directory** | **blank** |
-| Dockerfile Path | `./server/Dockerfile` |
-| Docker Build Context Directory | `.` |
-| Health Check Path | `/healthz` |
-| `ALLOWED_ORIGINS` | wherever the studio is served from |
-| Instances | 1 — see below |
-
-**Leave Root Directory empty.** It re-roots every other path, so setting it to
-`server` — the intuitive thing to do for a service that lives in `server/` —
-makes the two paths below it resolve inside `server/server/`, and puts `shared/`
-outside the context altogether. The build then fails on three `COPY` steps with
-`"/shared": not found`, and the context loads as `2B` because BuildKit only
-fetches paths a `COPY` actually references. The blueprint avoids this by not
-setting `rootDir` at all.
-
-Then point the studio at it: **Settings → Signaling → Server address**,
-`wss://your-service.onrender.com`. Or set `VITE_SIGNALING_URL` at build time so
-every device gets it without being configured.
-
-A few decisions the image encodes:
-
-- **`PORT` is honoured, not pinned.** Render injects its own port and the
-  server reads whatever it is given; the image only sets a default so a bare
-  `docker run` works. `HOST` defaults to `0.0.0.0`, because a container's
-  loopback is not reachable from Render's router.
-- **`/healthz` is the health check, not `/`.** It is the relay's own endpoint,
-  registered ahead of Next, and it reports room and peer counts — so a pass
-  means the *relay* is up rather than that something is answering the port.
-  That distinction is not academic: a different process holding the port fails
-  in the most confusing way available, with the WebSocket connecting at the TCP
-  level and then never upgrading.
-- **It runs as the unprivileged `node` user**, and the container is PID 1 so it
-  receives `SIGTERM` directly — the server closes sockets on it and gives up
-  after 5s rather than being killed by the host.
-- **One instance.** Room state lives in one process's memory, so a second
-  instance would split rooms across them: two guests given the same room name
-  could land on different instances and never find each other. Scaling out
-  needs shared state and sticky sessions first.
-- **Platform-wrong native binaries are pruned.** The lockfile lists every
-  platform variant of Next's SWC binding and of sharp's libvips as optional
-  dependencies, and npm installs each one that *could* match — so a glibc base
-  image ships a musl build of each alongside, 174MB that can never load. The
-  glibc SWC binary is deliberately kept: `next.config.ts` is TypeScript and
-  Next transpiles it with SWC at startup, so it is a runtime dependency.
-
-Verified by running the real browser suite against the container: Scenario E
-passes with the studio pointed at the containerized relay rather than a local
-`npm run dev`.
 
 ## Persistence
 
@@ -1287,8 +1045,8 @@ not remember anything.
 - **Pointer capture** on `window` keeps gestures alive past the canvas edge and
   guarantees the up handler fires, so a drag can never get stuck on.
 - **Lazy loading is per role.** Each role view is its own chunk, so a guest
-  opening an invite link downloads ~4kB gzipped — not the mixer, recorder or
-  scene editor, none of which their page can use. Diagnostics and every dialog
+  opening a room link does not download the mixer, recorder or scene editor,
+  none of which their page can use. Diagnostics and every dialog
   split out again on first use.
 - **Decoded assets are cached** per source rather than re-decoded per frame.
 - **Device switches use `applyConstraints`** on the live track first, falling
@@ -1343,8 +1101,8 @@ npm run e2e:install      # once — downloads Chromium
 npm run e2e              # browser scenarios
 ```
 
-The browser suite starts both the studio and the relay. If port 3001 is already
-taken by something else, point both at a free one:
+The browser suite starts both the studio and the media server. If port 3001 is
+already taken by something else, point both at a free one:
 
 ```bash
 LIVEDECK_RELAY_PORT=3100 npm run e2e
@@ -1402,128 +1160,77 @@ the browser's own player and the filename extension matches the real MIME type);
 hide, record across a scene switch); **C** resource cleanup (delete releases the
 stream, duplicate-then-delete keeps the original alive, recording releases its
 capture, leaving a room stops every track, repeated start/stop cycles do not
-accumulate streams, config survives a reload but capture does not); **D** invite
-links and peers (Manual mode); **E** room joining (the default), including the
-participant lifecycle — leaving removes a guest, and rejoining or reloading does
-not duplicate them; **F** the scene window, which asserts that the mirrored
-program really decodes *moving* frames rather than showing a single stuck
-image; **G** device pickers, the speaking indicator, and solo sharing —
-including that a copied solo link really decodes the feed it names in a
-*different* window; **H** the guest-to-guest mesh — two guests sent nothing but
-a room link decode each other's video with no control room involved, a third
-joining an existing pair sees both, two guests share the width evenly, a
-director in the room stays invisible to guests, joining switches nothing on, a
-camera turned on *after* the handshake still reaches the other side, and a
-screen share replaces the sharer's camera and gets its own region.
+accumulate streams, config survives a reload but capture does not); **E** room
+joining, including the participant lifecycle — leaving removes a guest, and
+rejoining or reloading does not duplicate them; **F** the scene window, which
+asserts that the mirrored program really decodes *moving* frames rather than
+showing a single stuck image; **G** device pickers, the speaking indicator, and
+solo sharing; **H** guests among themselves — two guests sent nothing but a
+room link decode each other's video with no control room involved, a third
+joining an existing pair sees both, a director in the room stays invisible to
+guests, joining switches nothing on, a camera turned on *after* joining still
+reaches the other side, and a screen share gets its own region; **I**
+authorization and recovery — guest A drives its session directly to mute,
+relabel, cue, put on air and kick guest B and the server answers `forbidden`
+to each while B's window is untouched; the director's tile control does flip
+B's microphone and a cue lands on B's screen; then B's network is cut and
+restored, and B comes back as the same participant with the director still
+holding one tile; **L** a twelve-participant load run, which only runs under
+`LIVEDECK_LOAD=1`.
 
-Scenario D is worth describing in full, because it exercises the parts that are
-easiest to fake. It asserts that the generated link's **fragment really contains
-gathered ICE candidates** (decoding and inflating it in the browser to check),
-that a wrong-direction or malformed paste is named specifically, and then runs a
-complete handshake across two browser contexts: the guest *opens the link*,
-`?label=` is applied, the offer is consumed and the fragment cleared, an answer
-link appears unprompted, and both sides reach a genuine `connected` state. It
-then proves the control channel end-to-end — the director mutes the guest's
-microphone and the assertion is that the **guest's own window** flips to
-"Unmute", which can only happen if the command crossed the data channel and
-disabled their track. A cue is checked the same way. Finally it verifies the
-scene route contains **no banner, no buttons and no tablist**, and that
-`?ratio=9:16&quality=1080` really resizes the canvas to 1080×1920.
-
-Scenario E is the default path, and runs against the real relay — Playwright
-starts `server/` alongside the dev server. A guest context is given nothing but
-`/push/<room>`: it asserts the join control is present and the director's list
-is *empty* until the guest clicks it, that the name the guest typed is what
-appears in the control room, that both sides reach a genuine `connected` state,
-that no manual-exchange controls exist on either side, and that the control
-channel still crosses to the guest's own tracks. The transport is seeded through
-the persisted setting rather than clicked through Settings, because switching it
-mid-test would tear down and rebuild the adapter.
-
-Even so, a limit worth stating: both contexts run on one machine, so host
-candidates always match and the connection always succeeds. It verifies the
-workflow and the state machine, **not** NAT traversal. Cross-network
-connectivity cannot be proven from a test runner on a single host and needs
-manual two-device testing.
+Every scenario runs against the real media server — Playwright starts
+`server/` alongside the dev server. A limit worth stating: all contexts run on
+one machine, so media always reaches the server over the loopback. It verifies
+the workflow, the authorization and the state machine, **not** NAT traversal
+across the internet, which needs two real networks.
 
 ## Known limitations
 
 Collected honestly in one place.
 
-1. **Without a TURN relay, some peer connections will fail.** Symmetric NAT or
-   UDP-blocking firewalls need one. **This is the most common cause of
-   "connection failed", and signaling alone does not fix it** — media is
-   peer-to-peer in both transports, so the same NAT limits apply either way.
-   The fix is [Cloudflare Realtime TURN](#cloudflare-realtime-turn): two
-   variables in `server/.env` and the relay mints credentials per connection.
-   A static server also works, under Settings › ICE servers as
-   `turn:host:port|username:password` or baked in via `VITE_TURN_URLS` — but
-   those credentials ship in the browser bundle, so use them only for a relay
-   you do not mind strangers using. Either way the studio reports `failed` and
-   says which of the three cases it was (relay present and still failed, public
-   address only, or host candidates only), rather than faking a connected state.
-2. **In Manual mode, an invite link gets you most of the way, not all of it.**
-   The link carries the offer, so the guest needs no setup — but their answer
-   still has to come back by hand, because no server can carry it. This is why
-   the relay is the default; it is also why Manual still exists, for installs
-   that cannot run one. See [Signaling transports](#signaling-transports).
-3. **Screen capture targets are chosen by the browser, not the app.** Which
-   screens, windows and tabs you may pick is entirely the browser's native
-   picker. The app cannot enumerate or pre-select a target, and can only read
-   what was picked when the browser reports `displaySurface` (Chrome does;
-   others do not).
-4. **Room size is capped by the mesh.** Every participant sends its camera to
-   every other one, so encode cost and uplink grow with the square of the room.
-   The relay refuses a 13th peer, but the practical ceiling is lower and
-   depends on the weakest machine in the room — a handful of guests, not a
-   dozen. Going further needs a server-side mixer (an SFU), which is a
-   different architecture and not what this is.
-5. **Display audio is not guaranteed.** `audio: true` is a request. Whether a
-   track arrives depends on the OS, browser and chosen surface — Chrome on
-   Windows can share tab and system audio, macOS generally cannot share a whole
-   screen's audio, Firefox and Safari largely do not offer it. The app inspects
-   the actual tracks and explains when none arrived.
-6. **A recording in progress is lost if the page is closed.** The browser will
-   not allow finalization during `beforeunload`.
-7. **Output quality cannot exceed the sources.** 1080p60 from a 720p30 camera
-   upscales and repeats frames; the settings dialog says so.
-8. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
+1. **The media server must be reachable over UDP or TCP on its media port.**
+   A host that publishes only HTTP (Render's web services, serverless
+   platforms) cannot carry media directly; a TURN relay in front is the
+   fallback and costs latency. Set `MEDIASOUP_ANNOUNCED_ADDRESS` to the
+   public address, or nothing outside the host will connect.
+2. **One process.** Rooms and routers live in memory; rooms do not span
+   instances and a restart drops every room (clients reconnect and re-join).
+3. **Screen capture targets are chosen by the browser, not the app.**
+4. **Display audio is not guaranteed.** `audio: true` is a request; whether a
+   track arrives depends on the OS, browser and surface. The app inspects the
+   tracks and says when none arrived.
+5. **A recording is finalized only on Stop.** Chunks are stored every second,
+   so a crash loses at most the last one and the recording is recovered on
+   the next load with a duration computed from the chunk timestamps — but
+   the last slice is gone.
+6. **WebM files carry a duration but no cues.** Browsers and most players
+   seek them; some editors want a cues index, which needs a full re-mux
+   (a WebCodecs + MP4 path is the next step). Safari records MP4 natively.
+7. **The compositor paints on the main thread.** A worker-timed clock keeps
+   frames flowing when the tab is hidden, but a very heavy UI frame can still
+   delay a paint. Moving painting into a worker needs frame providers that
+   do not depend on `HTMLVideoElement`.
+8. **Output quality cannot exceed the sources.**
+9. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
    missing. The control is disabled with an explanation.
-9. **Large recordings may exceed the storage quota.** They stay downloadable for
-   the session and are marked "Not stored".
-10. **Precise drag editing is impractical on small screens.** The mobile layout
-   keeps the preview and recording status visible and points to the numeric
-   controls, rather than pretending touch dragging on a 360px-wide canvas is
-   equivalent.
-11. **Local image and video files are capped at 40MB** and held in memory for
-    the session, since they are read as data URLs.
-12. **Invite links are long** — a few kilobytes even compressed, because they
-    contain a full SDP. They paste fine into chat and email, but they are not
-    pretty, and some SMS clients will break them across lines.
+10. **Large recordings may exceed the storage quota.** Recording refuses to
+    start with less than 200 MB free, and a quota error mid-recording stops
+    it and keeps what was stored.
+11. **Precise drag editing is impractical on small screens.**
+12. **Local image and video files are capped at 500 MB** and live in
+    IndexedDB.
 13. **A scene window mirrors the control room, so it depends on it.** The
-    program is sent to it over a loopback peer connection, because a
-    `MediaStream` cannot cross a browsing context — so closing the control room
-    stops the mirror, and the scene window says so rather than freezing on the
-    last frame. With no control room open it falls back to its own compositor,
-    which can draw the saved scene layout but none of the live sources. It is
-    not an independent process.
-14. **Remote control needs an open data channel.** Before a peer connects only
-    the local controls apply — the UI disables the remote ones rather than
-    pretending.
-15. **The signaling server is not serverless-deployable.** It holds WebSocket
-    connections and room state in one process's memory, so it needs a
-    persistent host — not Vercel functions — and it does not scale past a single
-    instance without shared state. Limits are 12 peers per room and 500 rooms.
-16. **A room name is not access control, in either transport.** With the relay
-    running, anyone who can reach it and guesses the name joins the room. There
-    is no authentication anywhere in this project, and adding real accounts
-    would mean a backend that owns identity.
-17. **Room joining requires the relay to be running.** It is the default
-    transport, so a fresh install with nothing on port 3001 reports "Could not
-    reach the signaling server" and no guest can join until it is up or
-    Signaling is switched to Manual. The studio cannot fall back silently:
-    quietly demoting rooms to the copy-a-link flow is how "guests just don't
-    appear" happens.
+    program is sent to it over a loopback peer connection inside the same
+    browser. With no control room open it falls back to its own compositor.
+14. **Remote control needs the server.** Commands go through it so it can
+    authorize them; without a connection the UI disables them.
+15. **The director key lives in the browser that claimed the room.** Lose
+    that browser's storage and the key is gone with it; set `ROOM_KEY_SECRET`
+    so a known key can be re-derived, or open the room while it is empty to
+    claim it again.
+16. **The room name is not a password.** It grants the guest role to anyone
+    who reaches the server. The keys are what gate the director and producer
+    roles.
 
 ## Guided demonstration
 
@@ -1562,17 +1269,17 @@ Reproduces the full production workflow in about three minutes.
 
 ### The room workflow
 
-15. With the relay running, open the **Guests** tab and click
-    **Copy room link**. One link, reusable, no fields to fill in.
+15. With the media server running, open the **Guests** tab and copy the
+    **guest link**. One link, reusable, no fields to fill in.
 16. Open it in a second browser profile, or on another device on the same
     network. Type a name and click **Join room**.
 17. The guest appears in the control room under the name *they* chose, and both
-    sides report *Connected* from their real `connectionState`. Nothing was
+    sides report *Connected* from their real transport state. Nothing was
     pasted anywhere.
 18. Click **Leave room** on the guest to drop the connection and return to the
     join screen.
 19. From the guest's tile, click **Mic** under "Remote". Watch the *guest's own*
-    window flip to "Unmute" — the command crossed the data channel and disabled
+    window flip to "Unmute" — the command went through the server and disabled
     their track, it did not just change your mix.
 20. Type a message in **Cue all** and send it. It appears as an alert on the
     guest's page.
@@ -1604,66 +1311,48 @@ the channel is not muted in the mixer.
 **"Not stored" on a recording** — The storage quota was exceeded. Download it
 now; it will be lost on reload. Delete older recordings to free space.
 
-**Peer connection reaches `failed`** — Both sides gathered candidates but could
-not reach each other. The error says which case it is, because the fix differs:
-*public address found but unreachable* is symmetric NAT or a UDP-blocking
-firewall and needs a **TURN server**; *only local-network candidates* means STUN
-itself never answered; *a relay was present and it still failed* points at the
-TURN server's own credentials or reachability. Set
-`CLOUDFLARE_TURN_KEY_ID` and `CLOUDFLARE_TURN_API_TOKEN` in `server/.env` — see
-[Cloudflare Realtime TURN](#cloudflare-realtime-turn) — or add a static server
-under Settings › ICE servers as `turn:host:port|username:password`. **Switching
-to the signaling server does not fix this** — media is peer-to-peer either way.
-See limitation 1.
+**A guest is listed but no media arrives** — The browser could not reach the
+media server's media port. On a laptop the server auto-detects its LAN
+address; anywhere else `MEDIASOUP_ANNOUNCED_ADDRESS` must be the public
+address and the UDP/TCP media ports must be published (`docker run -p
+40000-40003:40000-40003/udp …`). The server's startup line prints what it is
+announcing. A guest behind a NAT that blocks both UDP and TCP needs TURN: set
+the Cloudflare or coturn variables in `server/.env`; credentials are then
+issued per session inside the join.
 
-**TURN is configured but no relay candidate appears** — Check in this order.
-The relay's startup line states whether it read the Cloudflare key at all; if
-it says *not configured*, the variables are not in that process's environment
-(`server/.env` is not auto-loaded — set them in the shell or your host's
-config). If it says configured, open `GET /ice-servers` on the relay directly:
-`{"configured":false}` means the same thing, a 502 carries the Cloudflare error
-verbatim, and a 200 with URLs means the relay is fine and the studio could not
-reach it — usually `ALLOWED_ORIGINS` missing the studio's origin, which
-withholds the CORS header and makes the fetch fail in the browser only. The
-studio toasts the cause either way; a 403 from Cloudflare specifically means the
-API token is wrong or rotated.
-
-**"Could not reach the signaling server", but the relay is up** — Most likely
+**"Could not reach the media server", but it is up** — Most likely
 `ALLOWED_ORIGINS` does not contain the studio's origin, and the socket is being
-refused with a 403. You cannot see that from the browser: it hides the HTTP
-status of a failed WebSocket handshake, so the console says only *"WebSocket
-connection failed"*. Check the relay's startup log, which prints the effective
-allow-list, and compare it with the studio's origin exactly — `scheme://host`,
-no trailing slash, and `https` not `http` if the studio is served over TLS. A
-`curl` probe is not a valid test here: a client that sends no `Origin` header at
-all is allowed through by design, so curl passes while every browser is
-refused.
+refused with a 403. The browser hides the HTTP status of a failed WebSocket
+handshake, so the console says only *"WebSocket connection failed"*. Check the
+server's startup log, which prints the effective allow-list, and compare it
+with the studio's origin exactly — `scheme://host`, no trailing slash.
 
-**"Could not reach the signaling server"** — The relay is not running, or
-something else is on its port. Start it with `npm --prefix server run dev` and
-check `http://localhost:3001/healthz` returns JSON. If that returns an HTML page
-instead, a *different* process owns the port — which fails in the most
-confusing way available, because the WebSocket connects at the TCP level and
-then never upgrades, leaving the studio in *Connecting…* indefinitely. Either
-free the port or set `VITE_SIGNALING_URL` and the relay's `PORT` to a free one.
+**"Could not reach the media server"** — It is not running, or something else
+is on its port. Start it with `npm --prefix server run dev` and check
+`http://localhost:3001/healthz` returns JSON with `rooms`, `peers` and
+`workers`. If an HTML page comes back instead, a *different* process owns the
+port. Either free it or set `VITE_SIGNALING_URL` and the server's `PORT` to a
+free one.
 
-**Guests open the room link but never appear** — Check the Guests panel reports
-*Connected to the signaling server* first; that is a separate fact from any
-guest having connected. Then confirm the guest actually clicked **Join room** —
-opening the link alone announces nothing, by design. Both sides must also be on
-the same relay and the same room name.
+**Guests open the room link but never appear** — Check the Guests panel says
+*In the room as director* first. Then confirm the guest actually clicked
+**Join room** — opening the link alone announces nothing, by design. Both
+sides must also be on the same server and the same room name.
 
-**The relay serves an unrelated page, or refuses to start** — `server/.next` is
-a build cache; a stale one from another project produces both. Delete it and
-restart. Next's dev server also holds a lock allowing only one instance per
-directory, so kill any existing one before starting a second.
+**The control room says it is in the room as a guest** — This browser does not
+hold the director key: somebody else claimed the room first, or this browser's
+storage was cleared. Open the room with the director link (`?key=…`) from the
+browser that holds it, or wait for the room to empty and open it again to
+claim it. Set `ROOM_KEY_SECRET` on the server so keys survive restarts.
 
-**"The link may have been truncated"** — Only part of the link was copied.
-Invite links are long; use the Copy button, or select the whole textarea.
+**A remote command is refused** — The server answered `forbidden`: this
+session's role may not do that to that participant. Producers cannot put
+guests on air or kick them, and nobody below director can act on the
+director. The toast names the refusal.
 
-**Remote mute does nothing** — The control channel is not open. The buttons are
-disabled when that is the case; if they are enabled and the command still fails,
-a toast says so.
+**Remote mute does nothing** — The session to the media server is not up. The
+buttons are disabled when that is the case; if they are enabled and the
+command still fails, a toast says why.
 
 **The scene window is black** — Open the director view for the same room in
 another window. The scene window is a *mirror*: live sources (camera, screen
@@ -1687,43 +1376,46 @@ src/
 │   ├── studio/           program canvas, editor overlay, settings, palette, URL help
 │   ├── sources/          source list, capture controls, properties, add-source
 │   ├── scenes/           scene strip
-│   ├── guests/           guest tiles, invite-link panel
+│   ├── guests/           guest tiles, call grid, room links
 │   ├── audio/            mixer, level meters
 │   ├── recording/        transport controls, library
 │   ├── diagnostics/      diagnostics panel
-│   └── shared/           button, panel, fields, dialog, status, toast
+│   └── shared/           button, panel, fields, dialog, status, toast, error boundary
 ├── hooks/                one responsibility each; the only React↔service bridge
+├── media/                the SFU client: signaling client, media session,
+│                         encodings, quality manager and controller, session store
 ├── services/
 │   ├── media/            stream registry (ownership), device + capture services
-│   ├── composition/      compositor, composition model, interaction controller,
-│   │                     frame providers, asset cache, program link (the
-│   │                     scene-window mirror)
-│   ├── audio/            mixer graph, meter bus
-│   ├── recording/        recording engine, MIME negotiation
-│   ├── webrtc/           peer manager, control channel, ICE, getStats
-│   ├── signaling/        adapter interface, manual + websocket adapters,
-│   │                     invite links, URL parameters, validation
+│   ├── composition/      compositor, frame clock, composition model, interaction
+│   │                     controller, frame providers, asset cache, program link
+│   ├── audio/            mixer graph, master chain, meter worklet, meter bus
+│   ├── recording/        recording engine, MIME negotiation, WebM duration, recovery
+│   ├── signaling/        server address, ICE server parsing, URL parameters
 │   ├── sources/          source factory, default placement, stream keys
-│   └── persistence/      localStorage, IndexedDB, documents, object URLs
+│   └── persistence/      localStorage, schemas, issues, documents, assets (IndexedDB),
+│                         recordings (IndexedDB, chunked), object URLs
 ├── stores/               zustand stores, one per domain
 ├── types/                domain types
 ├── utils/                geometry, snapping, audio math, formatting, errors, ids
 ├── lib/                  capability detection, class-name helper
-└── test/                 browser API stubs for the unit suite
-e2e/                      Playwright scenarios A–H
-shared/                   the signaling wire protocol — the only code compiled by
-                          both the browser client and the server
-server/                   signaling relay (Next.js + ws). Required for guests to
-                          join by room link; everything else runs without it
+└── test/                 browser API stubs and mediasoup doubles for the unit suite
+e2e/                      Playwright scenarios, including authorization, recovery
+                          and a twelve-participant load run
+shared/                   protocol schemas and the role capability table — compiled
+                          into both the browser and the server
+server/                   the media server: signaling + mediasoup SFU
 ├── Dockerfile            container image; build context is the repo root
 └── src/
-    ├── rooms.ts          room registry, limits, rate limiting (all the logic)
-    ├── signaling.ts      WebSocket plumbing, heartbeat, origin checks
-    └── server.ts         Node http server that owns `upgrade`, with Next inside
-render.yaml               Render blueprint for the relay
+    ├── mediasoup/        config, worker pool, room (router + transports +
+    │                     producers + consumers), peer
+    ├── rooms/            room manager and limits
+    ├── signaling/        WebSocket server, request handlers, room keys
+    ├── security/         rate limiting by category, connection caps
+    ├── turn/             per-session TURN credentials (Cloudflare or coturn)
+    ├── http.ts           landing page and /healthz
+    └── server.ts         wiring and shutdown
+render.yaml               Render blueprint (HTTP only; see the note inside)
 ```
-
----
 
 ## Final note
 

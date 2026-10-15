@@ -75,7 +75,8 @@ async function main(): Promise<void> {
     log('mediasoup', {
       workers: mediasoupConfig.numWorkers,
       mediaPorts: `${mediasoupConfig.port}-${mediasoupConfig.port + mediasoupConfig.numWorkers - 1}`,
-      announcedAddress: mediasoupConfig.announcedAddress ?? '(unset — set MEDIASOUP_ANNOUNCED_ADDRESS for anything but localhost)',
+      announcedAddress: mediasoupConfig.announcedAddress ?? '(unset)',
+      announcedFrom: process.env.MEDIASOUP_ANNOUNCED_ADDRESS ? 'env' : 'auto-detected (set MEDIASOUP_ANNOUNCED_ADDRESS when deploying)',
       udp: mediasoupConfig.enableUdp,
       tcp: mediasoupConfig.enableTcp,
     })

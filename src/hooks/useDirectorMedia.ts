@@ -76,47 +76,58 @@ export function useDirectorMedia(room: string, keyFromUrl: string | null): Direc
  * so a shared screen is its own source rather than replacing the face.
  */
 function useParticipantBinding(snapshot: SessionSnapshot): void {
-  const { addPeerGuest, attachStream, detachStream, removeGuest } = useGuests()
-  const bindPeer = useGuestStore((state) => state.bindPeer)
-  const setPeerState = useGuestStore((state) => state.setPeerState)
-  const setControlState = useGuestStore((state) => state.setControlState)
-  const removePeer = useGuestStore((state) => state.removePeer)
+  const guests = useGuests()
   const participantToGuest = useRef(new Map<string, string>())
 
-  const guestFor = useCallback(
-    (participant: Participant): string => {
-      const existing = participantToGuest.current.get(participant.id)
-      if (existing) return existing
-      const guest = addPeerGuest(participant.label)
-      participantToGuest.current.set(participant.id, guest.id)
-      bindPeer(guest.id, participant.id)
-      return guest.id
-    },
-    [addPeerGuest, bindPeer],
-  )
+  /*
+   * The guest helpers are rebuilt whenever the source list changes, and the
+   * effects below *change* the source list. Depending on them directly made
+   * the effect re-run on its own output: a render loop that React stops with
+   * "maximum update depth exceeded" the moment two guests were in the room.
+   * The latest helpers are read through a ref instead; the snapshot slices
+   * are the only inputs.
+   */
+  const helpers = useRef(guests)
+  helpers.current = guests
+
+  const guestFor = useCallback((participant: Participant): string => {
+    const existing = participantToGuest.current.get(participant.id)
+    if (existing) return existing
+    const guest = helpers.current.addPeerGuest(participant.label)
+    participantToGuest.current.set(participant.id, guest.id)
+    useGuestStore.getState().bindPeer(guest.id, participant.id)
+    return guest.id
+  }, [])
+
+  const { participants, tracks, status, signaling, recvTransport, error } = snapshot
 
   // Roster → rows and live state.
   useEffect(() => {
+    const store = useGuestStore.getState()
     const present = new Set<string>()
-    for (const participant of snapshot.participants) {
+    for (const participant of participants) {
       if (participant.role === 'director') continue
       present.add(participant.id)
       const guestId = guestFor(participant)
       const current = useGuestStore.getState().guests[guestId]
       if (current && current.name !== participant.label) {
-        useGuestStore.getState().renameGuest(guestId, participant.label)
+        store.renameGuest(guestId, participant.label)
       }
-      const tracks = snapshot.tracks.filter((t) => t.participantId === participant.id)
-      setPeerState(describePeer(participant, tracks, snapshot))
-      setControlState(describeControl(participant, snapshot))
+      const mine = tracks.filter((t) => t.participantId === participant.id)
+      const nextPeer = describePeer(participant, mine, { status, recvTransport, error })
+      if (!shallowEqual(useGuestStore.getState().peerStates[participant.id], nextPeer)) store.setPeerState(nextPeer)
+      const nextControl = describeControl(participant, { status, signaling })
+      if (!shallowEqual(useGuestStore.getState().controlStates[participant.id], nextControl)) {
+        store.setControlState(nextControl)
+      }
     }
     for (const [participantId, guestId] of [...participantToGuest.current]) {
       if (present.has(participantId)) continue
       participantToGuest.current.delete(participantId)
-      removePeer(participantId)
-      removeGuest(guestId)
+      store.removePeer(participantId)
+      helpers.current.removeGuest(guestId)
     }
-  }, [guestFor, removeGuest, removePeer, setControlState, setPeerState, snapshot])
+  }, [error, guestFor, participants, recvTransport, signaling, status, tracks])
 
   // Tracks → streams in the registry → sources.
   const attached = useRef(new Map<string, string>()) // registry key → fingerprint
@@ -127,21 +138,21 @@ function useParticipantBinding(snapshot: SessionSnapshot): void {
       byParticipant.set(track.participantId, [...list, track])
     }
     const liveKeys = new Set<string>()
-    for (const [participantId, tracks] of byParticipant) {
+    for (const [participantId, mine] of byParticipant) {
       const guestId = participantToGuest.current.get(participantId)
       if (!guestId) continue
-      const faceTracks = tracks.filter((t) => t.source === 'camera' || t.source === 'mic')
-      const screenTracks = tracks.filter((t) => t.source === 'screen' || t.source === 'screen-audio')
+      const faceTracks = mine.filter((t) => t.source === 'camera' || t.source === 'mic')
+      const screenTracks = mine.filter((t) => t.source === 'screen' || t.source === 'screen-audio')
       if (faceTracks.length > 0) {
         const key = streamKeys.guest(guestId)
         liveKeys.add(key)
-        syncStream(key, faceTracks, attached.current, (stream) => attachStream(guestId, stream))
+        syncStream(key, faceTracks, attached.current, (stream) => helpers.current.attachStream(guestId, stream))
       }
       if (screenTracks.length > 0) {
         const key = streamKeys.guestScreen(guestId)
         liveKeys.add(key)
         syncStream(key, screenTracks, attached.current, (stream) =>
-          attachStream(guestId, stream, { screen: true }),
+          helpers.current.attachStream(guestId, stream, { screen: true }),
         )
       }
     }
@@ -150,22 +161,30 @@ function useParticipantBinding(snapshot: SessionSnapshot): void {
       attached.current.delete(key)
       const guestId = key.split(':')[1]
       if (!guestId) continue
-      detachStream(guestId, { screen: key.startsWith('guest-screen:') })
+      helpers.current.detachStream(guestId, { screen: key.startsWith('guest-screen:') })
     }
-  }, [attachStream, detachStream, snapshot.tracks])
+  }, [tracks])
 
   // Everything goes when the session does.
   useEffect(
     () => () => {
+      const store = useGuestStore.getState()
       for (const [participantId, guestId] of participantToGuest.current) {
-        removePeer(participantId)
-        removeGuest(guestId)
+        store.removePeer(participantId)
+        helpers.current.removeGuest(guestId)
       }
       participantToGuest.current.clear()
       attached.current.clear()
     },
-    [removeGuest, removePeer],
+    [],
   )
+}
+
+function shallowEqual(a: Record<string, unknown> | undefined, b: Record<string, unknown>): boolean {
+  if (!a) return false
+  const keys = Object.keys(b)
+  if (keys.length !== Object.keys(a).length) return false
+  return keys.every((key) => a[key] === b[key])
 }
 
 function syncStream(
@@ -190,21 +209,25 @@ function syncStream(
   attach(stream)
 }
 
-function describePeer(participant: Participant, tracks: RemoteTrack[], snapshot: SessionSnapshot): PeerState {
-  const transport = snapshot.recvTransport
+function describePeer(
+  participant: Participant,
+  tracks: RemoteTrack[],
+  session: Pick<SessionSnapshot, 'status' | 'recvTransport' | 'error'>,
+): PeerState {
+  const transport = session.recvTransport
   const status: PeerState['status'] =
-    snapshot.status === 'recovering' || transport === 'disconnected'
+    session.status === 'recovering' || transport === 'disconnected'
       ? 'reconnecting'
-      : transport === 'failed' || snapshot.status === 'failed'
+      : transport === 'failed' || session.status === 'failed'
         ? 'failed'
-        : snapshot.status === 'joined'
+        : session.status === 'joined'
           ? 'connected'
           : 'connecting'
   return {
     peerId: participant.id,
     role: 'guest',
     status,
-    error: snapshot.status === 'failed' ? snapshot.error : null,
+    error: session.status === 'failed' ? session.error : null,
     hasRemoteVideo: tracks.some((t) => t.kind === 'video' && !t.producerPaused),
     hasRemoteAudio: tracks.some((t) => t.kind === 'audio' && !t.producerPaused),
     connectedAt: participant.joinedAt,
@@ -212,10 +235,13 @@ function describePeer(participant: Participant, tracks: RemoteTrack[], snapshot:
   }
 }
 
-function describeControl(participant: Participant, snapshot: SessionSnapshot): ControlChannelState {
+function describeControl(
+  participant: Participant,
+  session: Pick<SessionSnapshot, 'status' | 'signaling'>,
+): ControlChannelState {
   return {
     peerId: participant.id,
-    open: snapshot.status === 'joined' && snapshot.signaling === 'connected',
+    open: session.status === 'joined' && session.signaling === 'connected',
     latencyMs: null,
     reportedMicMuted: participant.micMuted,
     reportedCameraMuted: participant.cameraMuted,

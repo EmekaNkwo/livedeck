@@ -166,7 +166,9 @@ export function PushPage() {
   if (!rawRoom || !room) return <Navigate to="/" replace />
 
   const inLobby = !joinedAs
-  const connected = snapshot.status === 'joined'
+  const reconnecting =
+    snapshot.status === 'recovering' || (snapshot.status === 'joined' && snapshot.signaling === 'reconnecting')
+  const connected = snapshot.status === 'joined' && !reconnecting
   const failed = snapshot.status === 'failed'
   const mirroredSelf = parameters.mirror || camera.mirrored
   const permissionDenied = camera.status === 'denied' || microphone.status === 'denied'
@@ -296,7 +298,7 @@ export function PushPage() {
       : 'Connected'
     : failed
       ? 'Connection failed'
-      : snapshot.status === 'recovering'
+      : reconnecting
         ? 'Reconnecting'
         : joinedAs
           ? 'Connecting'
