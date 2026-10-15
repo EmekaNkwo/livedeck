@@ -13,7 +13,21 @@ export type AssetKind = 'image' | 'video'
 
 export type AssetEntry =
   | { kind: 'image'; element: HTMLImageElement; ready: boolean; error: string | null }
-  | { kind: 'video'; element: HTMLVideoElement; ready: boolean; error: string | null }
+  | {
+      kind: 'video'
+      element: HTMLVideoElement
+      ready: boolean
+      error: string | null
+      /**
+       * The element's captured audio, created once.
+       *
+       * `captureStream()` returns a *new* stream on every call, so handing a
+       * fresh one to the mixer on each reconcile rebuilt the channel's nodes
+       * on every fader move (a click, and a leaked capture each time). One
+       * capture per decoded asset, reused for its lifetime.
+       */
+      audioStream: MediaStream | null
+    }
 
 class AssetCache {
   private readonly entries = new Map<string, AssetEntry>()
@@ -30,7 +44,13 @@ class AssetCache {
     const entry: AssetEntry =
       kind === 'image'
         ? { kind: 'image', element: new Image(), ready: false, error: null }
-        : { kind: 'video', element: document.createElement('video'), ready: false, error: null }
+        : {
+            kind: 'video',
+            element: document.createElement('video'),
+            ready: false,
+            error: null,
+            audioStream: null,
+          }
 
     if (entry.kind === 'image') {
       entry.element.decoding = 'async'
@@ -79,6 +99,8 @@ class AssetCache {
       entry.element.pause()
       entry.element.removeAttribute('src')
       entry.element.load()
+      for (const track of entry.audioStream?.getTracks() ?? []) track.stop()
+      entry.audioStream = null
     } else {
       entry.element.onload = null
       entry.element.onerror = null
@@ -90,10 +112,11 @@ class AssetCache {
     for (const id of [...this.entries.keys()]) this.release(id)
   }
 
-  /** Audio tracks from a local video asset, for the mixer to pick up. */
+  /** Audio tracks from a local video asset, for the mixer to pick up. Stable per asset. */
   captureAudio(sourceId: string): MediaStream | null {
     const entry = this.entries.get(sourceId)
     if (!entry || entry.kind !== 'video') return null
+    if (entry.audioStream) return entry.audioStream
     const element = entry.element as HTMLVideoElement & {
       captureStream?: () => MediaStream
       mozCaptureStream?: () => MediaStream
@@ -101,7 +124,8 @@ class AssetCache {
     const capture = element.captureStream ?? element.mozCaptureStream
     if (typeof capture !== 'function') return null
     try {
-      return capture.call(element)
+      entry.audioStream = capture.call(element)
+      return entry.audioStream
     } catch {
       return null
     }

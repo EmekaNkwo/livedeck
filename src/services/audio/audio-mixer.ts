@@ -2,7 +2,9 @@ import type { AudioChannelConfig, AudioContextStatus, AudioLevel } from '@/types
 import { SILENT_LEVEL } from '@/types/audio'
 import { detectCapabilities } from '@/lib/capabilities'
 import { analyseTimeDomain, resolveGain, smoothMeter } from '@/utils/audio-math'
+import { createMasterChain, type MasterChain } from './master-chain'
 import { PROGRAM_METER_ID, meterBus } from './meter-bus'
+import { createMeterNode, ensureMeterWorklet } from './meter-worklet'
 
 /**
  * The program audio mixer.
@@ -18,8 +20,19 @@ import { PROGRAM_METER_ID, meterBus } from './meter-bus'
  *       └→ monitorGain   (per-channel local listen, silent by default)
  *
  * GRAPH (program)
- *   mixBus → masterGain → analyser → MediaStreamAudioDestinationNode  (recorder)
- *                                  └→ programMonitorGain → speakers
+ *   mixBus → masterGain → compressor → limiter → analyser → destination (recorder)
+ *                                                        └→ programMonitorGain → speakers
+ *
+ * The compressor evens out levels between a loud host and a quiet guest; the
+ * limiter is a brick wall at -1 dBFS so twelve open microphones summed at
+ * unity cannot clip the recording. See `master-chain.ts`.
+ *
+ * METERING
+ * --------
+ * Each channel and the program bus are metered by an AudioWorklet on the
+ * audio thread, which posts one reading per 50ms. Where worklets are not
+ * available the analysers are polled on a timer instead; the graph is the
+ * same either way.
  *
  * The analyser sits *before* the fader on purpose. A muted channel still shows
  * level, which is how an operator notices that a muted guest is talking. The
@@ -38,6 +51,8 @@ type Channel = {
   analyser: AnalyserNode
   fader: GainNode
   monitor: GainNode
+  /** The worklet meter, when the context supports one. */
+  meter: AudioWorkletNode | null
   buffer: Float32Array<ArrayBuffer>
   /** Smoothed meter value, so the needle falls gradually. */
   smoothed: number
@@ -55,10 +70,26 @@ export class AudioMixer {
   private programSmoothed = 0
   private destination: MediaStreamAudioDestinationNode | null = null
   private programMonitor: GainNode | null = null
+  private masterChain: MasterChain | null = null
+  private programMeter: AudioWorkletNode | null = null
+  private workletReady = false
 
   private readonly channels = new Map<string, Channel>()
   private meterTimer: ReturnType<typeof setInterval> | null = null
   private status: AudioContextStatus = 'uninitialized'
+  private readonly statusListeners = new Set<(status: AudioContextStatus) => void>()
+
+  /** Observe context state changes (suspended by the OS, device switched). */
+  onStatusChange(listener: (status: AudioContextStatus) => void): () => void {
+    this.statusListeners.add(listener)
+    return () => this.statusListeners.delete(listener)
+  }
+
+  private publishStatus(): void {
+    const status = this.getStatus()
+    this.status = status
+    for (const listener of this.statusListeners) listener(status)
+  }
 
   getStatus(): AudioContextStatus {
     if (!detectCapabilities().webAudio) return 'unavailable'
@@ -80,13 +111,23 @@ export class AudioMixer {
       return this.status
     }
     if (!this.context) {
-      this.context = new AudioContext({ latencyHint: 'interactive' })
+      // 48 kHz is what Opus and every WebRTC path run at; letting the context
+      // follow a 44.1 kHz system default would resample every guest twice.
+      this.context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48_000 })
+      this.context.addEventListener('statechange', () => {
+        this.publishStatus()
+        // An interruption (a device switch, Safari backgrounding) suspends the
+        // context without a gesture. Resuming is allowed in that case.
+        if (this.context?.state === 'suspended') void this.resume()
+      })
 
       this.mixBus = this.context.createGain()
       this.mixBus.gain.value = 1
 
       this.masterGain = this.context.createGain()
       this.masterGain.gain.value = 1
+
+      this.masterChain = createMasterChain(this.context)
 
       this.programAnalyser = this.context.createAnalyser()
       this.programAnalyser.fftSize = 1024
@@ -99,14 +140,30 @@ export class AudioMixer {
       this.programMonitor.gain.value = 0
 
       this.mixBus.connect(this.masterGain)
-      this.masterGain.connect(this.programAnalyser)
+      this.masterGain.connect(this.masterChain.input)
+      this.masterChain.output.connect(this.programAnalyser)
       this.programAnalyser.connect(this.destination)
       this.programAnalyser.connect(this.programMonitor)
       this.programMonitor.connect(this.context.destination)
+
+      this.workletReady = await ensureMeterWorklet(this.context)
+      if (this.workletReady) {
+        this.programMeter = createMeterNode(this.context, (reading) => {
+          this.programSmoothed = smoothMeter(this.programSmoothed, reading.rms)
+          meterBus.publish(PROGRAM_METER_ID, {
+            rms: this.programSmoothed,
+            peak: reading.peak,
+            db: toDb(this.programSmoothed),
+            clipping: reading.clipping,
+          })
+        })
+        this.programAnalyser.connect(this.programMeter)
+      }
     }
 
     await this.resume()
     this.startMetering()
+    this.publishStatus()
     return this.getStatus()
   }
 
@@ -174,8 +231,21 @@ export class AudioMixer {
       analyser,
       fader,
       monitor,
+      meter: null,
       buffer: new Float32Array(analyser.fftSize),
       smoothed: 0,
+    }
+    if (this.workletReady) {
+      channel.meter = createMeterNode(context, (reading) => {
+        channel.smoothed = smoothMeter(channel.smoothed, reading.rms)
+        meterBus.publish(config.id, {
+          rms: channel.smoothed,
+          peak: reading.peak,
+          db: toDb(channel.smoothed),
+          clipping: reading.clipping,
+        })
+      })
+      analyser.connect(channel.meter)
     }
     this.channels.set(config.id, channel)
     this.applyConfig(channel, config)
@@ -218,13 +288,15 @@ export class AudioMixer {
       channel.analyser,
       channel.fader,
       channel.monitor,
+      channel.meter,
     ]) {
       try {
-        node.disconnect()
+        node?.disconnect()
       } catch {
         // Already disconnected.
       }
     }
+    if (channel.meter) channel.meter.port.onmessage = null
     meterBus.reset(channelId)
     if (this.channels.size === 0) this.stopMetering()
   }
@@ -264,6 +336,8 @@ export class AudioMixer {
    * display refresh rate.
    */
   private startMetering(): void {
+    // The worklet pushes readings itself; polling is the fallback.
+    if (this.workletReady) return
     if (this.meterTimer !== null) return
     if (!this.context) return
     this.meterTimer = setInterval(() => this.sampleMeters(), METER_INTERVAL_MS)
@@ -315,12 +389,16 @@ export class AudioMixer {
     this.stopMetering()
     for (const id of [...this.channels.keys()]) this.removeChannel(id)
     meterBus.reset(PROGRAM_METER_ID)
+    this.masterChain?.disconnect()
+    this.masterChain = null
+    if (this.programMeter) this.programMeter.port.onmessage = null
     for (const node of [
       this.mixBus,
       this.masterGain,
       this.programAnalyser,
       this.programMonitor,
       this.destination,
+      this.programMeter,
     ]) {
       try {
         node?.disconnect()
@@ -328,6 +406,8 @@ export class AudioMixer {
         // Already disconnected.
       }
     }
+    this.programMeter = null
+    this.workletReady = false
     this.mixBus = null
     this.masterGain = null
     this.programAnalyser = null
@@ -344,7 +424,14 @@ export class AudioMixer {
       }
     }
     this.status = 'uninitialized'
+    this.publishStatus()
   }
+}
+
+/** RMS (0..1) to dBFS, clamped at the meter floor. */
+function toDb(rms: number): number {
+  if (rms <= 0) return -60
+  return Math.max(-60, 20 * Math.log10(rms))
 }
 
 export const audioMixer = new AudioMixer()

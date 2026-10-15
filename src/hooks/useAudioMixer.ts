@@ -147,7 +147,11 @@ export function useAudioMixer(): UseAudioMixer {
       void audioMixer.resume().then(() => setContextStatus(audioMixer.getStatus()))
     }
     document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
+    const offStatus = audioMixer.onStatusChange(setContextStatus)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      offStatus()
+    }
   }, [setContextStatus])
 
   const channels = order
