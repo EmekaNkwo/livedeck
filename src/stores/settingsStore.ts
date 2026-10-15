@@ -3,7 +3,9 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import type { OutputSettings, StudioSettings } from '@/types/session'
 import { DEFAULT_SETTINGS } from '@/types/session'
 import type { FrameRateId } from '@/types/scene'
+import { reportPersistenceIssue } from '@/services/persistence/issues'
 import { createSafeStorage, storageKey } from '@/services/persistence/local-store'
+import { salvageSettings } from '@/services/persistence/schemas'
 
 /**
  * Studio preferences.
@@ -102,13 +104,24 @@ export const useSettingsStore = create<SettingsState>()(
       // Merge rather than replace, so a settings key added in a later version
       // gets its default instead of becoming undefined.
       merge: (persisted, current) => {
-        const incoming = (persisted as { settings?: Partial<StudioSettings> } | undefined)?.settings
+        const raw = (persisted as { settings?: unknown } | undefined)?.settings
+        if (raw === undefined) return { ...current, settings: DEFAULT_SETTINGS }
+        // Field by field: a corrupt frame rate costs that one preference, not
+        // every setting the operator chose, and never a crash on open.
+        const { settings: incoming, dropped } = salvageSettings(raw)
+        if (dropped.length > 0) {
+          reportPersistenceIssue({
+            record: 'settings',
+            message: `invalid value${dropped.length === 1 ? '' : 's'} for ${dropped.join(', ')}; default${dropped.length === 1 ? '' : 's'} restored`,
+          })
+        }
+        const output = (incoming.output as Partial<StudioSettings['output']> | undefined) ?? {}
         return {
           ...current,
           settings: {
             ...DEFAULT_SETTINGS,
-            ...incoming,
-            output: { ...DEFAULT_SETTINGS.output, ...incoming?.output },
+            ...(incoming as Partial<StudioSettings>),
+            output: { ...DEFAULT_SETTINGS.output, ...output },
           },
         }
       },

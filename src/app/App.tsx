@@ -1,4 +1,6 @@
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, useEffect } from 'react'
+import { onPersistenceIssue } from '@/services/persistence/issues'
+import { useStudioStore } from '@/stores/studioStore'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Toast } from '@/components/shared/Toast'
@@ -37,6 +39,14 @@ const SoloPage = lazy(() =>
 )
 
 export function App() {
+  const showToast = useStudioStore((state) => state.showToast)
+  useEffect(
+    () =>
+      onPersistenceIssue((issue) =>
+        showToast(`Saved ${issue.record} could not be used (${issue.message}). Defaults were restored.`, 'error'),
+      ),
+    [showToast],
+  )
   return (
     <>
       <Suspense fallback={<RouteFallback />}>

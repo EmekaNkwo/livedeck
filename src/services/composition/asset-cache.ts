@@ -9,15 +9,27 @@
  * source is removed — the compositor never owns asset lifetime.
  */
 
+import type { AssetRef } from '@/types/source'
+import { getAsset } from '@/services/persistence/asset-store'
+
 export type AssetKind = 'image' | 'video'
 
+/** Identity of what an entry was loaded from, for the idempotence check. */
+function refKey(ref: AssetRef): string {
+  if (ref.assetId) return `asset:${ref.assetId}`
+  if (ref.dataUrl) return ref.dataUrl
+  return ''
+}
+
 export type AssetEntry =
-  | { kind: 'image'; element: HTMLImageElement; ready: boolean; error: string | null }
+  | { kind: 'image'; element: HTMLImageElement; ready: boolean; error: string | null; key: string; objectUrl: string | null }
   | {
       kind: 'video'
       element: HTMLVideoElement
       ready: boolean
       error: string | null
+      key: string
+      objectUrl: string | null
       /**
        * The element's captured audio, created once.
        *
@@ -36,22 +48,54 @@ class AssetCache {
    * Begin decoding an asset for `sourceId`. Idempotent: calling it again with
    * the same url returns the existing entry rather than re-decoding.
    */
-  load(sourceId: string, kind: AssetKind, url: string, loop = true): AssetEntry {
+  load(sourceId: string, kind: AssetKind, ref: AssetRef, loop = true): AssetEntry {
+    const key = refKey(ref)
     const existing = this.entries.get(sourceId)
-    if (existing && currentUrl(existing) === url) return existing
+    if (existing && existing.key === key) return existing
     if (existing) this.release(sourceId)
 
     const entry: AssetEntry =
       kind === 'image'
-        ? { kind: 'image', element: new Image(), ready: false, error: null }
+        ? { kind: 'image', element: new Image(), ready: false, error: null, key, objectUrl: null }
         : {
             kind: 'video',
             element: document.createElement('video'),
             ready: false,
             error: null,
+            key,
+            objectUrl: null,
             audioStream: null,
           }
+    this.entries.set(sourceId, entry)
 
+    if (!key) {
+      entry.error = 'This source has no media file.'
+      return entry
+    }
+    if (ref.dataUrl && !ref.assetId) {
+      this.attach(entry, ref.dataUrl, loop)
+      return entry
+    }
+    // An asset id resolves asynchronously; the entry reports `loading` until
+    // the blob is read and an object URL exists for it.
+    const assetId = ref.assetId as string
+    void getAsset(assetId)
+      .then((asset) => {
+        if (this.entries.get(sourceId) !== entry) return
+        if (!asset) {
+          entry.error = 'The media file is missing from this browser’s storage.'
+          return
+        }
+        entry.objectUrl = URL.createObjectURL(asset.blob)
+        this.attach(entry, entry.objectUrl, loop)
+      })
+      .catch(() => {
+        if (this.entries.get(sourceId) === entry) entry.error = 'The media file could not be read.'
+      })
+    return entry
+  }
+
+  private attach(entry: AssetEntry, url: string, loop: boolean): void {
     if (entry.kind === 'image') {
       entry.element.decoding = 'async'
       entry.element.onload = () => {
@@ -81,9 +125,6 @@ class AssetCache {
         entry.error = 'Playback was blocked by the browser. Interact with the page and retry.'
       })
     }
-
-    this.entries.set(sourceId, entry)
-    return entry
   }
 
   get(sourceId: string): AssetEntry | null {
@@ -105,6 +146,10 @@ class AssetCache {
       entry.element.onload = null
       entry.element.onerror = null
       entry.element.removeAttribute('src')
+    }
+    if (entry.objectUrl) {
+      URL.revokeObjectURL(entry.objectUrl)
+      entry.objectUrl = null
     }
   }
 
@@ -132,8 +177,5 @@ class AssetCache {
   }
 }
 
-function currentUrl(entry: AssetEntry): string {
-  return entry.element.src
-}
 
 export const assetCache = new AssetCache()

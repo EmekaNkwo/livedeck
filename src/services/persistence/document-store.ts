@@ -3,7 +3,10 @@ import type { Scene } from '@/types/scene'
 import type { MediaSource } from '@/types/source'
 import type { AudioChannelConfig } from '@/types/audio'
 import type { StudioSession } from '@/types/session'
+import { dataUrlToBlob, putAsset } from './asset-store'
+import { reportPersistenceIssue } from './issues'
 import { readJson, removeKey, writeJson } from './local-store'
+import { StudioDocumentSchema, StudioSessionSchema, validate } from './schemas'
 
 /**
  * Per-session studio documents.
@@ -43,11 +46,22 @@ function documentKey(sessionId: string): string {
 /* ------------------------------------------------------------------ session index */
 
 export function listSessions(): StudioSession[] {
-  const sessions = readJson<StudioSession[]>(SESSION_INDEX, [])
-  if (!Array.isArray(sessions)) return []
-  return sessions
-    .filter((session): session is StudioSession => Boolean(session?.id))
-    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
+  const sessions = readJson<unknown>(SESSION_INDEX, [])
+  if (!Array.isArray(sessions)) {
+    reportPersistenceIssue({ record: 'session index', message: 'not a list; it was reset' })
+    return []
+  }
+  const valid: StudioSession[] = []
+  let dropped = 0
+  for (const candidate of sessions) {
+    const result = validate(StudioSessionSchema, candidate, 'session')
+    if (result.ok) valid.push(result.data as StudioSession)
+    else dropped += 1
+  }
+  if (dropped > 0) {
+    reportPersistenceIssue({ record: 'session index', message: `${dropped} malformed entr${dropped === 1 ? 'y was' : 'ies were'} dropped` })
+  }
+  return valid.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
 }
 
 export function findSession(sessionId: string): StudioSession | null {
@@ -73,25 +87,66 @@ export function deleteSession(sessionId: string): void {
 
 /* ------------------------------------------------------------------ documents */
 
+/**
+ * Load and validate a document.
+ *
+ * A document that fails validation is discarded and reported, and the
+ * session opens with defaults: a corrupt production must never crash the
+ * studio or wedge it so a reload hits the same crash. The broken record is
+ * kept under a `.corrupt` key for an operator who wants to inspect it.
+ */
 export function loadDocument(sessionId: string): StudioDocument | null {
-  const raw = readJson<StudioDocument | null>(documentKey(sessionId), null)
-  if (!raw || raw.version !== 1) return null
-  // Defensive normalization: a hand-edited or partially-written document must
-  // not be able to crash the studio on open.
-  return {
-    version: 1,
-    sessionId,
-    savedAt: typeof raw.savedAt === 'number' ? raw.savedAt : 0,
-    sources: Array.isArray(raw.sources) ? raw.sources : [],
-    sourceOrder: Array.isArray(raw.sourceOrder) ? raw.sourceOrder : [],
-    scenes: Array.isArray(raw.scenes) ? raw.scenes : [],
-    sceneOrder: Array.isArray(raw.sceneOrder) ? raw.sceneOrder : [],
-    activeSceneId: typeof raw.activeSceneId === 'string' ? raw.activeSceneId : null,
-    guests: Array.isArray(raw.guests) ? raw.guests : [],
-    guestOrder: Array.isArray(raw.guestOrder) ? raw.guestOrder : [],
-    audioChannels: Array.isArray(raw.audioChannels) ? raw.audioChannels : [],
-    audioChannelOrder: Array.isArray(raw.audioChannelOrder) ? raw.audioChannelOrder : [],
+  const raw = readJson<unknown>(documentKey(sessionId), null)
+  if (raw === null) return null
+  const result = validate(StudioDocumentSchema, raw, `production "${sessionId}"`)
+  if (!result.ok) {
+    reportPersistenceIssue(result.issue)
+    writeJson(`${documentKey(sessionId)}.corrupt`, raw)
+    removeKey(documentKey(sessionId))
+    return null
   }
+  const document = result.data as StudioDocument
+  // Order lists may name ids that no longer exist; drop those rather than
+  // letting a renderer look them up.
+  const sourceIds = new Set(document.sources.map((source) => source.id))
+  const sceneIds = new Set(document.scenes.map((scene) => scene.id))
+  const guestIds = new Set(document.guests.map((guest) => guest.id))
+  const channelIds = new Set(document.audioChannels.map((channel) => channel.id))
+  return {
+    ...document,
+    sessionId,
+    sourceOrder: document.sourceOrder.filter((id) => sourceIds.has(id)),
+    sceneOrder: document.sceneOrder.filter((id) => sceneIds.has(id)),
+    activeSceneId: document.activeSceneId && sceneIds.has(document.activeSceneId) ? document.activeSceneId : null,
+    guestOrder: document.guestOrder.filter((id) => guestIds.has(id)),
+    audioChannelOrder: document.audioChannelOrder.filter((id) => channelIds.has(id)),
+  }
+}
+
+/**
+ * Move legacy data-URL assets into the asset store.
+ *
+ * Returns the sources whose settings changed, so the caller can update the
+ * live store and re-save. Sources that cannot be converted keep their data
+ * URL and keep working from it.
+ */
+export async function migrateLegacyAssets(sources: MediaSource[]): Promise<MediaSource[]> {
+  const migrated: MediaSource[] = []
+  for (const source of sources) {
+    const settings = source.settings
+    if ((settings.kind !== 'image' && settings.kind !== 'video') || settings.assetId || !settings.dataUrl) continue
+    const blob = dataUrlToBlob(settings.dataUrl)
+    if (!blob) continue
+    try {
+      const asset = await putAsset({ kind: settings.kind, name: source.name, type: blob.type, size: blob.size, blob })
+      const { dataUrl: _dropped, ...rest } = settings
+      void _dropped
+      migrated.push({ ...source, settings: { ...rest, assetId: asset.id } })
+    } catch {
+      // Storage unavailable: the data URL stays and still renders.
+    }
+  }
+  return migrated
 }
 
 export function saveDocument(document: Omit<StudioDocument, 'version' | 'savedAt'>): boolean {

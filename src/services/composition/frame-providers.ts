@@ -54,7 +54,7 @@ export function resolveFrame(source: MediaSource): Frame {
       return { kind: 'text', source }
 
     case 'image': {
-      const entry = assetCache.load(source.id, 'image', source.settings.dataUrl)
+      const entry = assetCache.load(source.id, 'image', source.settings)
       if (entry.error) return { kind: 'empty', reason: 'decode-error' }
       if (!entry.ready) return { kind: 'empty', reason: 'loading' }
       const element = entry.element as HTMLImageElement
@@ -67,7 +67,7 @@ export function resolveFrame(source: MediaSource): Frame {
     }
 
     case 'video': {
-      const entry = assetCache.load(source.id, 'video', source.settings.dataUrl, source.settings.loop)
+      const entry = assetCache.load(source.id, 'video', source.settings, source.settings.loop)
       if (entry.error) return { kind: 'empty', reason: 'decode-error' }
       const element = entry.element as HTMLVideoElement
       return fromVideoElement(element, entry.ready)

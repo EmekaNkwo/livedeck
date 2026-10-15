@@ -49,12 +49,24 @@ export type SourceSettings =
   | { kind: 'screen'; withSystemAudio: boolean }
   | { kind: 'remote-video'; guestId: string; screen?: boolean }
   | { kind: 'remote-audio'; guestId: string; screen?: boolean }
-  | { kind: 'image'; dataUrl: string; fit: ObjectFit }
-  | { kind: 'video'; dataUrl: string; loop: boolean; fit: ObjectFit }
+  | { kind: 'image'; fit: ObjectFit } & AssetRef
+  | { kind: 'video'; loop: boolean; fit: ObjectFit } & AssetRef
   | { kind: 'text'; text: string; style: TextStyle }
   | { kind: 'color-background'; color: string }
 
 export type ObjectFit = 'contain' | 'cover' | 'fill'
+
+/**
+ * Where a local media file lives.
+ *
+ * `assetId` points at a Blob in IndexedDB, which is where every asset goes
+ * now. `dataUrl` is the legacy form, kept so a document saved by an older
+ * build still opens; it is migrated to an asset on first load.
+ */
+export type AssetRef = {
+  assetId?: string
+  dataUrl?: string
+}
 
 export type TextStyle = {
   fontSize: number

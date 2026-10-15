@@ -2,6 +2,7 @@ import { Image as ImageIcon, Palette, Type, Video } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { DEFAULT_TEXT_STYLE } from '@/services/composition/compositor'
 import { useMediaSources } from '@/hooks/useMediaSources'
+import { MAX_ASSET_BYTES, putAsset } from '@/services/persistence/asset-store'
 import { useStudioStore } from '@/stores/studioStore'
 import { Button } from '@/components/shared/Button'
 import { Dialog } from '@/components/shared/Dialog'
@@ -17,8 +18,6 @@ import { Notice } from '@/components/shared/Status'
  * memory.
  */
 
-/** Data URLs inflate by ~33%, and they are held in memory, so cap the input. */
-const MAX_FILE_BYTES = 40 * 1024 * 1024
 
 export function AddSourceDialog() {
   const dialog = useStudioStore((state) => state.dialog)
@@ -34,35 +33,27 @@ export function AddSourceDialog() {
 
   const open = dialog === 'add-source'
 
-  const readFile = (file: File): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result))
-      reader.onerror = () => reject(new Error('The file could not be read.'))
-      reader.readAsDataURL(file)
-    })
-
   const handleFile = async (file: File | undefined, kind: 'image' | 'video') => {
     setFileError(null)
     if (!file) return
 
-    if (file.size > MAX_FILE_BYTES) {
+    if (file.size > MAX_ASSET_BYTES) {
       setFileError(
-        `“${file.name}” is ${Math.round(file.size / 1_000_000)} MB. The limit is 40 MB, because the ` +
-          'file is held in memory for this session rather than uploaded anywhere.',
+        `“${file.name}” is ${Math.round(file.size / 1_000_000)} MB. The limit is ${Math.round(MAX_ASSET_BYTES / 1_000_000)} MB.`,
       )
       return
     }
 
     try {
-      const dataUrl = await readFile(file)
+      // The bytes go to IndexedDB; the production only carries the id.
+      const asset = await putAsset({ kind, name: file.name, type: file.type, size: file.size, blob: file })
       addSource({
         name: file.name.replace(/\.[^.]+$/, ''),
         type: kind,
         settings:
           kind === 'image'
-            ? { kind: 'image', dataUrl, fit: 'contain' }
-            : { kind: 'video', dataUrl, loop: true, fit: 'contain' },
+            ? { kind: 'image', assetId: asset.id, fit: 'contain' }
+            : { kind: 'video', assetId: asset.id, loop: true, fit: 'contain' },
         // A local video can carry audio, which the mixer picks up from the
         // decoded element once a channel exists.
         addToMixer: kind === 'video',
@@ -71,7 +62,9 @@ export function AddSourceDialog() {
       showToast(`Added “${file.name}”.`, 'success')
       closeDialog()
     } catch {
-      setFileError('The file could not be read. It may be corrupt or in an unsupported format.')
+      setFileError(
+        'The file could not be stored in this browser. Storage may be full or unavailable in private browsing.',
+      )
     }
   }
 

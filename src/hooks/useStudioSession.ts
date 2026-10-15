@@ -15,6 +15,7 @@ import {
   findSession,
   listSessions,
   loadDocument,
+  migrateLegacyAssets,
   saveDocument,
   touchSession,
   upsertSession,
@@ -90,6 +91,8 @@ export function useStudioSession(): UseStudioSession {
   const refreshSessions = useCallback(() => setSessions(listSessions()), [])
 
   /** Collect the current production into a serializable document. */
+  const saveFailureShown = useRef(false)
+
   const buildDocument = useCallback((sessionId: string) => {
     const sourceState = useSourceStore.getState()
     const sceneState = useSceneStore.getState()
@@ -112,7 +115,19 @@ export function useStudioSession(): UseStudioSession {
   const save = useCallback(() => {
     const current = useStudioStore.getState().session
     if (!current) return
-    saveDocument(buildDocument(current.id))
+    const ok = saveDocument(buildDocument(current.id))
+    // Said once: a storage that refuses writes refuses every autosave, and a
+    // toast per keystroke would bury the message it is trying to deliver.
+    if (!ok && !saveFailureShown.current) {
+      saveFailureShown.current = true
+      useStudioStore
+        .getState()
+        .showToast(
+          'This production could not be saved: browser storage is full or unavailable. Changes will be lost on reload.',
+          'error',
+        )
+    }
+    if (ok) saveFailureShown.current = false
   }, [buildDocument])
 
   /** Load a document into the stores, or seed a default scene. */
@@ -120,6 +135,15 @@ export function useStudioSession(): UseStudioSession {
     const document = loadDocument(sessionId)
     if (document) {
       useSourceStore.getState().hydrate(document.sources, document.sourceOrder)
+      // Legacy data-URL assets move to IndexedDB in the background; the
+      // sources keep rendering from the data URL until then.
+      void migrateLegacyAssets(document.sources).then((migrated) => {
+        if (migrated.length === 0) return
+        const store = useSourceStore.getState()
+        for (const source of migrated) {
+          if (store.sources[source.id]) store.updateSettings(source.id, source.settings)
+        }
+      })
       useSceneStore
         .getState()
         .hydrate(document.scenes, document.sceneOrder, document.activeSceneId)
