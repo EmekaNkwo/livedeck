@@ -336,7 +336,8 @@ export class MediaSession {
     }
     this.knownProducers.clear()
     for (const producer of joined.producers) this.knownProducers.set(producer.id, producer)
-    this.patch({ self: this.participants.get(self.id) ?? self, role: joined.role, room: joined.room, iceServers: this.iceServers })
+    this.patch({ self, role: joined.role, room: joined.room, iceServers: this.iceServers })
+    this.publishParticipants()
 
     if (joined.resumed && this.device && this.sendTransport && this.recvTransport) {
       // The server kept our transports. Restart ICE on both and we are back.

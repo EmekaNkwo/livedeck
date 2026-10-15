@@ -6,7 +6,7 @@ import {
   sourceRows,
   startCamera,
   startMicrophone,
-  useSignalingTransport,
+  useMediaServer,
 } from './fixtures'
 
 /**
@@ -26,12 +26,12 @@ import {
 
 test.describe('Scenario F: the scene window mirrors the program', () => {
   test.beforeEach(async ({ page }) => {
-    await useSignalingTransport(page, 'server')
+    await useMediaServer(page)
   })
 
   test('shows the live program, with real decoded frames', async ({ browser }) => {
     const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(context, 'server')
+    await useMediaServer(context)
     const director = await context.newPage()
     const scene = await context.newPage()
 
@@ -90,8 +90,8 @@ test.describe('Scenario F: the scene window mirrors the program', () => {
   test('a joined guest appears once, in a correctly proportioned box', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
+    await useMediaServer(hostContext)
+    await useMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -99,7 +99,7 @@ test.describe('Scenario F: the scene window mirrors the program', () => {
       await openDirector(host, 'mirror-guest')
       await openTab(host, /Guests/)
       await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
+        host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
       // A guest sending *both* camera and microphone is the case that broke:

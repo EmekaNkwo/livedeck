@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { openDirector, openTab, startCamera, useSignalingTransport } from './fixtures'
+import { openDirector, openTab, startCamera, useMediaServer } from './fixtures'
 
 /**
  * Scenario H — guests seeing each other, with and without a director.
@@ -52,14 +52,14 @@ async function decodesFrames(page: Page, name: string): Promise<void> {
 
 test.describe('Scenario H: guest-to-guest mesh', () => {
   test.beforeEach(async ({ page }) => {
-    await useSignalingTransport(page, 'server')
+    await useMediaServer(page)
   })
 
   test('two guests in one room see each other with no director', async ({ browser }) => {
     const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const second = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(first, 'server')
-    await useSignalingTransport(second, 'server')
+    await useMediaServer(first)
+    await useMediaServer(second)
     const ana = await first.newPage()
     const bo = await second.newPage()
 
@@ -96,7 +96,7 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
       browser.newContext({ permissions: ['camera', 'microphone'] }),
       browser.newContext({ permissions: ['camera', 'microphone'] }),
     ])
-    for (const context of contexts) await useSignalingTransport(context, 'server')
+    for (const context of contexts) await useMediaServer(context)
     const [ana, bo, cas] = await Promise.all(contexts.map((context) => context.newPage()))
 
     try {
@@ -127,8 +127,8 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
   test('two guests with no director share the width evenly', async ({ browser }) => {
     const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const second = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(first, 'server')
-    await useSignalingTransport(second, 'server')
+    await useMediaServer(first)
+    await useMediaServer(second)
     const ana = await first.newPage()
     const bo = await second.newPage()
 
@@ -172,8 +172,8 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
   test('a director in the room is invisible to guests', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
+    await useMediaServer(hostContext)
+    await useMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -182,7 +182,7 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
       await startCamera(host)
       await openTab(host, /Guests/)
       await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
+        host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
       await joinAs(guest, 'mesh-featured', 'Ana')
@@ -212,7 +212,7 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
    */
   test('joining does not turn on a camera or microphone you did not', async ({ browser }) => {
     const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(context, 'server')
+    await useMediaServer(context)
     const page = await context.newPage()
 
     try {
@@ -246,8 +246,8 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
   test('turning a camera on after joining reaches the other guest', async ({ browser }) => {
     const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const second = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(first, 'server')
-    await useSignalingTransport(second, 'server')
+    await useMediaServer(first)
+    await useMediaServer(second)
     const ana = await first.newPage()
     const bo = await second.newPage()
 
@@ -282,8 +282,8 @@ test.describe('Scenario H: guest-to-guest mesh', () => {
   }) => {
     const first = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const second = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(first, 'server')
-    await useSignalingTransport(second, 'server')
+    await useMediaServer(first)
+    await useMediaServer(second)
     const ana = await first.newPage()
     const bo = await second.newPage()
 

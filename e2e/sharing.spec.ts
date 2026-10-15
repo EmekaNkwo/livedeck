@@ -6,7 +6,7 @@ import {
   openTab,
   sourceRows,
   startCamera,
-  useSignalingTransport,
+  useMediaServer,
 } from './fixtures'
 
 /**
@@ -19,7 +19,7 @@ import {
 
 test.describe('Scenario G: devices, speaking, and solo links', () => {
   test.beforeEach(async ({ page }) => {
-    await useSignalingTransport(page, 'server')
+    await useMediaServer(page)
   })
 
   test('the guest lobby offers a device picker beside each toggle', async ({ page }) => {
@@ -57,8 +57,8 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
   test('in a call there is no meter, and speech shows on the person', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
+    await useMediaServer(hostContext)
+    await useMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -66,7 +66,7 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
       await openDirector(host, 'g-speaking')
       await openTab(host, /Guests/)
       await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
+        host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
       await guest.goto('/push/g-speaking')
@@ -116,7 +116,7 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
     const context = await browser.newContext({
       permissions: ['camera', 'microphone', 'clipboard-read', 'clipboard-write'],
     })
-    await useSignalingTransport(context, 'server')
+    await useMediaServer(context)
     const director = await context.newPage()
 
     try {
@@ -167,8 +167,8 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
       permissions: ['camera', 'microphone', 'clipboard-read', 'clipboard-write'],
     })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
+    await useMediaServer(hostContext)
+    await useMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -176,7 +176,7 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
       await openDirector(host, 'g-guestshare')
       await openTab(host, /Guests/)
       await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
+        host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
       await guest.goto('/push/g-guestshare')

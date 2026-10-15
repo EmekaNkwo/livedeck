@@ -10,33 +10,51 @@ import { type BrowserContext, type Page, expect } from '@playwright/test'
  */
 
 /**
- * Force a signaling transport before the app boots.
+ * Point the studio at the media server under test before the app boots.
  *
- * The studio defaults to room-based signaling, which needs the relay. Tests
- * that exercise the manual invite-link flow have to say so explicitly — seeding
- * the persisted setting is how, because the choice is read during the first
- * render and switching it through the UI afterwards would tear down and rebuild
- * the adapter mid-test.
- *
- * The shape here is zustand's persist envelope; `version: 2` keeps the store's
- * own v1→v2 migration (which moves old installs to rooms) from undoing this.
+ * Seeding the persisted setting is how, because the address is read during
+ * the first render. The shape is zustand's persist envelope at the store's
+ * current version so no migration rewrites it.
  */
-export async function useSignalingTransport(
-  target: Page | BrowserContext,
-  transport: 'manual' | 'server',
-): Promise<void> {
+export async function useMediaServer(target: Page | BrowserContext): Promise<void> {
   await target.addInitScript(
-    ([key, value, url]) => {
+    ([key, url]) => {
       window.localStorage.setItem(
         key as string,
-        JSON.stringify({
-          state: { settings: { signalingTransport: value, signalingServerUrl: url } },
-          version: 2,
-        }),
+        JSON.stringify({ state: { settings: { signalingServerUrl: url } }, version: 3 }),
       )
     },
-    ['livedeck:v1:settings', transport, RELAY_URL],
+    ['livedeck:v1:settings', RELAY_URL],
   )
+}
+
+/** The guest's driver for the media session, exposed in dev builds. */
+export async function sessionControl(
+  page: Page,
+  target: string,
+  command: Record<string, unknown>,
+): Promise<{ ok: boolean; code?: string }> {
+  return page.evaluate(
+    async ([participantId, cmd]) => {
+      const session = (window as unknown as { __livedeckSession?: { control: (t: string, c: unknown) => Promise<void> } }).__livedeckSession
+      if (!session) return { ok: false, code: 'no-session' }
+      try {
+        await session.control(participantId as string, cmd)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, code: (error as { code?: string }).code ?? 'error' }
+      }
+    },
+    [target, command] as const,
+  )
+}
+
+/** The participant id the page joined as, once joined. */
+export async function selfParticipantId(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const session = (window as unknown as { __livedeckSession?: { current: { self: { id: string } | null } } }).__livedeckSession
+    return session?.current.self?.id ?? null
+  })
 }
 
 /**

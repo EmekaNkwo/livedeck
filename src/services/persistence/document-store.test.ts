@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { loadDocument, saveDocument, listSessions, upsertSession } from './document-store'
+import {
+  deleteSession,
+  findSession,
+  hasDocument,
+  loadDocument,
+  migrateLegacyAssets,
+  saveDocument,
+  listSessions,
+  touchSession,
+  upsertSession,
+} from './document-store'
+import * as assetStore from './asset-store'
+import type { MediaSource } from '@/types/source'
 import { onPersistenceIssue, resetPersistenceIssues } from './issues'
 import { readJson, storageKey } from './local-store'
 
@@ -63,6 +75,61 @@ describe('document store', () => {
     onPersistenceIssue((issue) => issues.push(issue.message))
     expect(listSessions().map((session) => session.id)).toEqual(['a'])
     expect(issues[0]).toContain('2 malformed entries')
+  })
+
+  it('manages the session index', () => {
+    upsertSession({ id: 'a', name: 'A', mode: 'peer', createdAt: 1, lastOpenedAt: 1 })
+    upsertSession({ id: 'b', name: 'B', mode: 'local', createdAt: 2, lastOpenedAt: 5 })
+    expect(listSessions().map((s) => s.id)).toEqual(['b', 'a'])
+    touchSession('a')
+    expect(listSessions()[0]?.id).toBe('a')
+    expect(findSession('b')?.name).toBe('B')
+    expect(findSession('zzz')).toBeNull()
+    saveDocument({ ...document, sessionId: 'a' })
+    expect(hasDocument('a')).toBe(true)
+    deleteSession('a')
+    expect(hasDocument('a')).toBe(false)
+    expect(findSession('a')).toBeNull()
+  })
+
+  it('migrates data-URL assets into the asset store and leaves others alone', async () => {
+    vi.spyOn(assetStore, 'putAsset').mockImplementation(async (asset) => ({ ...asset, id: 'asset_new', createdAt: 1 }))
+    const legacy: MediaSource = {
+      id: 'img',
+      name: 'Logo',
+      type: 'image',
+      visible: true,
+      locked: false,
+      muted: false,
+      layer: 0,
+      settings: { kind: 'image', dataUrl: 'data:image/png;base64,aGk=', fit: 'contain' },
+      streamKey: null,
+      volume: 1,
+      createdAt: 1,
+    }
+    const modern: MediaSource = { ...legacy, id: 'img2', settings: { kind: 'image', assetId: 'asset_old', fit: 'cover' } }
+    const text: MediaSource = { ...legacy, id: 't', type: 'text', settings: { kind: 'text', text: 'x', style: { fontSize: 1, fontFamily: 'a', color: '#fff', backgroundColor: null, align: 'left', bold: false } } }
+    const migrated = await migrateLegacyAssets([legacy, modern, text])
+    expect(migrated).toHaveLength(1)
+    expect(migrated[0]?.settings).toEqual({ kind: 'image', assetId: 'asset_new', fit: 'contain' })
+  })
+
+  it('keeps the data URL when the asset store is unavailable', async () => {
+    vi.spyOn(assetStore, 'putAsset').mockRejectedValue(new Error('no idb'))
+    const legacy = {
+      id: 'v',
+      name: 'Clip',
+      type: 'video',
+      visible: true,
+      locked: false,
+      muted: false,
+      layer: 0,
+      settings: { kind: 'video', dataUrl: 'data:video/webm;base64,aGk=', loop: true, fit: 'contain' },
+      streamKey: null,
+      volume: 1,
+      createdAt: 1,
+    } as MediaSource
+    expect(await migrateLegacyAssets([legacy])).toEqual([])
   })
 
   it('reports a failed save', () => {

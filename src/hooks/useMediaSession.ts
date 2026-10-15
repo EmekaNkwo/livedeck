@@ -63,6 +63,9 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
     if (!room) return
     const session = new MediaSession({ url, extraIceServers: extraIceServersRef.current })
     sessionRef.current = session
+    // A handle for the browser test suite, which drives the session directly
+    // to prove the server refuses what the UI never offers.
+    if (import.meta.env.DEV) (window as unknown as { __livedeckSession?: MediaSession }).__livedeckSession = session
     const detach = attach(session)
     const offError = session.on('error', (message) => showToastRef.current(message, 'error'))
     void session.start({ room, label, key, role, claim }).catch(() => {

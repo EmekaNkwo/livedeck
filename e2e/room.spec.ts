@@ -5,7 +5,7 @@ import {
   openTab,
   sourceRows,
   startCamera,
-  useSignalingTransport,
+  useMediaServer,
 } from './fixtures'
 
 /**
@@ -18,15 +18,14 @@ import {
  * room with a genuine `connected` peer state. No link carries an offer, no code
  * is pasted, and the director never types the guest's name.
  *
- * It needs the relay in `server/` running — Playwright starts it alongside the
- * dev server. Signaling is the only thing it provides; media is still peer-to-
- * peer, and as in `peer.spec.ts` both contexts run on one machine, so this
- * verifies the workflow and the state machine rather than NAT traversal.
+ * It needs the media server in `server/` running — Playwright starts it
+ * alongside the dev server. Both contexts run on one machine, so this verifies
+ * the workflow and the state machine rather than NAT traversal.
  */
 
 test.describe('Scenario E: room-based joining', () => {
   test.beforeEach(async ({ page }) => {
-    await useSignalingTransport(page, 'server')
+    await useMediaServer(page)
   })
 
   test('the invite is a single reusable room link, with no guest fields', async ({ page }) => {
@@ -37,13 +36,15 @@ test.describe('Scenario E: room-based joining', () => {
 
     // Reaching the relay is reported as its own fact, separate from whether
     // any guest has connected.
-    await expect(guests.getByText(/Connected to the signaling server/i)).toBeVisible({
+    await expect(guests.getByText(/In the room as director/i)).toBeVisible({
       timeout: 30_000,
     })
 
     // The whole invitation: one link, one button.
-    await expect(guests.getByLabel('Guest join link')).toHaveValue(/\/push\/room-invite$/)
-    await expect(guests.getByRole('button', { name: /Copy room link/i })).toBeVisible()
+    await expect(guests.getByLabel('Guest link')).toHaveValue(/\/push\/room-invite$/)
+    await expect(guests.getByRole('button', { name: /Copy link/i }).first()).toBeVisible()
+    // The director also gets a producer link, carrying a key.
+    await expect(guests.getByLabel('Producer link')).toHaveValue(/\/push\/room-invite\?key=/)
 
     // And nothing per-guest to fill in — the guest names themselves.
     await expect(guests.getByLabel('Guest name')).toHaveCount(0)
@@ -63,8 +64,8 @@ test.describe('Scenario E: room-based joining', () => {
   }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
+    await useMediaServer(hostContext)
+    await useMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -72,7 +73,7 @@ test.describe('Scenario E: room-based joining', () => {
       await openDirector(host, 'room-lifecycle')
       await openTab(host, /Guests/)
       await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
+        host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
       const joinAs = async (name: string) => {
@@ -115,8 +116,8 @@ test.describe('Scenario E: room-based joining', () => {
   test('a guest opening the room link joins and connects', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useSignalingTransport(hostContext, 'server')
-    await useSignalingTransport(guestContext, 'server')
+    await useMediaServer(hostContext)
+    await useMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -125,7 +126,7 @@ test.describe('Scenario E: room-based joining', () => {
       await startCamera(host)
       await openTab(host, /Guests/)
       await expect(
-        host.getByRole('region', { name: 'Guests' }).getByText(/Connected to the signaling/i),
+        host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
       /* ------------- guest: nothing but the room URL ------------------- */
