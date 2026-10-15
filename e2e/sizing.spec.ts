@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './test'
 import { openDirector } from './fixtures'
 
 const geometry = (page: import('@playwright/test').Page) =>

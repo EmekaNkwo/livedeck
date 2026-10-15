@@ -43,17 +43,21 @@ export default defineConfig({
        * floor is lower than the floor on these directories.
        */
       thresholds: {
-        // The global floor is the measured level: hooks, pages and panels are
-        // exercised by the Playwright suite, not here. It exists to stop a
-        // regression, not to claim a target the unit suite does not meet.
-        lines: 36,
-        functions: 30,
-        branches: 27,
-        statements: 35,
+        // The unit suite's floor, just under its measured level. Hooks, pages
+        // and panels are mostly exercised by the Playwright suite; the 80%
+        // target is checked over both suites by `npm run coverage:all`.
+        lines: 58,
+        functions: 50,
+        branches: 45,
+        statements: 56,
         'src/media/**': { lines: 80, functions: 80, branches: 70, statements: 80 },
         'src/services/recording/**': { lines: 80, functions: 80, branches: 70, statements: 80 },
         'src/services/persistence/**': { lines: 70, functions: 70, branches: 60, statements: 68 },
         'src/services/signaling/**': { lines: 80, functions: 80, branches: 70, statements: 80 },
+        'src/services/audio/**': { lines: 90, functions: 90, branches: 85, statements: 90 },
+        'src/services/composition/**': { lines: 90, functions: 85, branches: 80, statements: 90 },
+        'src/services/media/**': { lines: 90, functions: 85, branches: 80, statements: 90 },
+        'src/stores/**': { lines: 90, functions: 90, branches: 80, statements: 90 },
       },
     },
   },

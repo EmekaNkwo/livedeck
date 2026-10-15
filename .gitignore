@@ -35,6 +35,7 @@ dist-ssr
 !.env.example
 server/.env
 coverage/
+coverage-e2e/
 
 # Tooling state
 .serena/

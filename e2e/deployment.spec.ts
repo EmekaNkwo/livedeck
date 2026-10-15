@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Page } from './test'
 import { HEALTH_URL, RELAY_URL } from './fixtures'
 
 /**

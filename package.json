@@ -16,7 +16,8 @@
     "e2e": "playwright test",
     "e2e:install": "playwright install chromium",
     "e2e:ui": "playwright test --ui",
-    "verify": "npm run typecheck && npm run lint && npm run test"
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "coverage:all": "node scripts/coverage-all.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
@@ -48,6 +49,7 @@
     "@vitest/coverage-v8": "^5.0.3",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
+    "monocart-coverage-reports": "2.13.0",
     "oxlint": "^1.87.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",

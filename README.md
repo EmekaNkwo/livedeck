@@ -145,6 +145,7 @@ RTP between participants; it does not decode, mix or record anything.
 | `npm run lint` | oxlint over `src` and `e2e` |
 | `npm test` | Vitest unit and integration suite |
 | `npm run test:coverage` | Vitest with a V8 coverage report |
+| `npm run coverage:all` | Unit and browser suites with coverage, merged; fails under 80% of lines |
 | `npm run e2e` | Playwright browser tests (run `npm run e2e:install` once first) |
 | `npm run verify` | typecheck + lint + unit tests |
 
@@ -1128,6 +1129,7 @@ Playwright browser tests across eight scenarios.
 ```bash
 npm test                 # unit + integration
 npm run test:coverage    # with coverage
+npm run coverage:all     # unit + browser coverage, merged
 npm run e2e:install      # once — downloads Chromium
 npm run e2e              # browser scenarios
 ```
@@ -1144,6 +1146,18 @@ Or run it against a deployment, with no local servers:
 ```bash
 LIVEDECK_BASE_URL=https://studio.example.com npm run e2e
 ```
+
+### Coverage across both suites
+
+Unit tests and the browser suite see different code. Unit tests reach error
+branches that no browser run triggers; the browser suite runs the hooks, pages
+and components that need a real DOM, media stack and server. `npm run
+coverage:all` runs both with V8 coverage, maps the browser's back to the
+TypeScript sources, and counts a line as covered when either suite executed
+it, out of the unit report's executable lines for every file under `src/`.
+It prints the merged figure beside each suite's own, per directory, and
+fails below 80% of lines. Statements and branches are not merged, because
+the two instrumentations do not share a statement map.
 
 ### What is tested where, and why
 
