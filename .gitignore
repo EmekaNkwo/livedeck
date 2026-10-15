@@ -35,3 +35,14 @@ dist-ssr
 !.env.example
 server/.env
 coverage/
+
+# Tooling state
+.serena/
+.fallow/
+*.tsbuildinfo
+
+# Coverage output
+coverage/
+
+# Local recordings / media exports
+recordings/

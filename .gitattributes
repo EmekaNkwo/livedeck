@@ -1,0 +1,17 @@
+# Normalize line endings: LF in the repository and on checkout.
+# The repo is edited from both Windows and WSL; without this every
+# checkout on Windows produced CRLF churn across the whole tree.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mp4 binary
+*.webm binary
+*.bin binary
