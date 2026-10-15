@@ -43,7 +43,9 @@ async function main(): Promise<void> {
   const httpServer = createServer(
     createHttpHandler(() => ({
       ...rooms.stats(),
+      ...rooms.mediaStats(),
       connections: signaling.connections(),
+      workerLoad: pool.slots.map((slot) => slot.load),
       workers: pool.slots.length,
       turn: turnConfig?.kind ?? 'none',
     })),

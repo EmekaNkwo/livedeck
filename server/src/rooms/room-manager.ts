@@ -42,6 +42,8 @@ export type RoomManager = {
   /** Drop a room if it is empty. Call after every leave. */
   reapIfEmpty: (name: string) => void
   stats: () => { rooms: number; peers: number }
+  /** Producer and consumer totals across rooms, for /healthz and load runs. */
+  mediaStats: () => { producers: number; consumers: number }
   closeAll: () => void
 }
 
@@ -97,6 +99,17 @@ export function createRoomManager(options: {
       rooms: rooms.size,
       peers: [...rooms.values()].reduce((sum, room) => sum + room.peers.size, 0),
     }),
+    mediaStats: () => {
+      let producers = 0
+      let consumers = 0
+      for (const room of rooms.values()) {
+        for (const peer of room.peers.values()) {
+          producers += peer.producers.size
+          consumers += peer.consumers.size
+        }
+      }
+      return { producers, consumers }
+    },
     closeAll: () => {
       for (const room of rooms.values()) room.close('server-shutdown')
       rooms.clear()
