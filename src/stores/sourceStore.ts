@@ -217,7 +217,8 @@ export const useSourceStore = create<SourceState>()((set, get) => ({
         // re-acquired after a reload, with fresh permission if needed.
         map[source.id] = { ...source, streamKey: null }
       }
-      const known = order.filter((id) => map[id])
+      // A corrupted saved order may repeat ids; each appears once.
+      const known = [...new Set(order.filter((id) => map[id]))]
       const missing = sources.map((s) => s.id).filter((id) => !known.includes(id))
       return { sources: map, order: [...known, ...missing], revision: state.revision + 1 }
     }),

@@ -136,7 +136,8 @@ export const useAudioStore = create<AudioState>()((set) => ({
         // the speakers would create instant feedback.
         map[channel.id] = { ...channel, monitoring: false }
       }
-      const known = order.filter((id) => map[id])
+      // A corrupted saved order may repeat ids; each appears once.
+      const known = [...new Set(order.filter((id) => map[id]))]
       const missing = channels.map((channel) => channel.id).filter((id) => !known.includes(id))
       return { channels: map, order: sortChannelIds([...known, ...missing], map) }
     }),

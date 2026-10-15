@@ -167,7 +167,8 @@ export const useGuestStore = create<GuestState>()((set, get) => ({
         // reload, so the binding is cleared rather than left dangling.
         map[guest.id] = { ...guest, peerId: null }
       }
-      const known = order.filter((id) => map[id])
+      // A corrupted saved order may repeat ids; each appears once.
+      const known = [...new Set(order.filter((id) => map[id]))]
       const missing = guests.map((guest) => guest.id).filter((id) => !known.includes(id))
       return {
         guests: map,

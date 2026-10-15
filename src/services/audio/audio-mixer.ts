@@ -73,6 +73,8 @@ export class AudioMixer {
   private masterChain: MasterChain | null = null
   private programMeter: AudioWorkletNode | null = null
   private workletReady = false
+  /** The one in-flight or finished graph setup; cleared by dispose. */
+  private graphSetup: Promise<void> | null = null
 
   private readonly channels = new Map<string, Channel>()
   private meterTimer: ReturnType<typeof setInterval> | null = null
@@ -110,61 +112,66 @@ export class AudioMixer {
       this.status = 'unavailable'
       return this.status
     }
-    if (!this.context) {
-      // 48 kHz is what Opus and every WebRTC path run at; letting the context
-      // follow a 44.1 kHz system default would resample every guest twice.
-      this.context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48_000 })
-      this.context.addEventListener('statechange', () => {
-        this.publishStatus()
-        // An interruption (a device switch, Safari backgrounding) suspends the
-        // context without a gesture. Resuming is allowed in that case.
-        if (this.context?.state === 'suspended') void this.resume()
-      })
-
-      this.mixBus = this.context.createGain()
-      this.mixBus.gain.value = 1
-
-      this.masterGain = this.context.createGain()
-      this.masterGain.gain.value = 1
-
-      this.masterChain = createMasterChain(this.context)
-
-      this.programAnalyser = this.context.createAnalyser()
-      this.programAnalyser.fftSize = 1024
-      this.programAnalyser.smoothingTimeConstant = 0.6
-      this.programBuffer = new Float32Array(this.programAnalyser.fftSize)
-
-      this.destination = this.context.createMediaStreamDestination()
-
-      this.programMonitor = this.context.createGain()
-      this.programMonitor.gain.value = 0
-
-      this.mixBus.connect(this.masterGain)
-      this.masterGain.connect(this.masterChain.input)
-      this.masterChain.output.connect(this.programAnalyser)
-      this.programAnalyser.connect(this.destination)
-      this.programAnalyser.connect(this.programMonitor)
-      this.programMonitor.connect(this.context.destination)
-
-      this.workletReady = await ensureMeterWorklet(this.context)
-      if (this.workletReady) {
-        this.programMeter = createMeterNode(this.context, (reading) => {
-          this.programSmoothed = smoothMeter(this.programSmoothed, reading.rms)
-          meterBus.publish(PROGRAM_METER_ID, {
-            rms: this.programSmoothed,
-            peak: reading.peak,
-            db: toDb(this.programSmoothed),
-            clipping: reading.clipping,
-          })
-        })
-        this.programAnalyser.connect(this.programMeter)
-      }
-    }
+    // Concurrent calls (a double click) share one setup, so the worklet
+    // and the polling fallback can never both end up metering.
+    if (!this.graphSetup) this.graphSetup = this.buildGraph()
+    await this.graphSetup
 
     await this.resume()
     this.startMetering()
     this.publishStatus()
     return this.getStatus()
+  }
+
+  private async buildGraph(): Promise<void> {
+    // 48 kHz is what Opus and every WebRTC path run at; letting the context
+    // follow a 44.1 kHz system default would resample every guest twice.
+    this.context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48_000 })
+    this.context.addEventListener('statechange', () => {
+      this.publishStatus()
+      // An interruption (a device switch, Safari backgrounding) suspends the
+      // context without a gesture. Resuming is allowed in that case.
+      if (this.context?.state === 'suspended') void this.resume()
+    })
+
+    this.mixBus = this.context.createGain()
+    this.mixBus.gain.value = 1
+
+    this.masterGain = this.context.createGain()
+    this.masterGain.gain.value = 1
+
+    this.masterChain = createMasterChain(this.context)
+
+    this.programAnalyser = this.context.createAnalyser()
+    this.programAnalyser.fftSize = 1024
+    this.programAnalyser.smoothingTimeConstant = 0.6
+    this.programBuffer = new Float32Array(this.programAnalyser.fftSize)
+
+    this.destination = this.context.createMediaStreamDestination()
+
+    this.programMonitor = this.context.createGain()
+    this.programMonitor.gain.value = 0
+
+    this.mixBus.connect(this.masterGain)
+    this.masterGain.connect(this.masterChain.input)
+    this.masterChain.output.connect(this.programAnalyser)
+    this.programAnalyser.connect(this.destination)
+    this.programAnalyser.connect(this.programMonitor)
+    this.programMonitor.connect(this.context.destination)
+
+    this.workletReady = await ensureMeterWorklet(this.context)
+    if (this.workletReady) {
+      this.programMeter = createMeterNode(this.context, (reading) => {
+        this.programSmoothed = smoothMeter(this.programSmoothed, reading.rms)
+        meterBus.publish(PROGRAM_METER_ID, {
+          rms: this.programSmoothed,
+          peak: reading.peak,
+          db: toDb(this.programSmoothed),
+          clipping: reading.clipping,
+        })
+      })
+      this.programAnalyser.connect(this.programMeter)
+    }
   }
 
   /** Resume a context the browser auto-suspended (tab backgrounded, etc.). */
@@ -377,7 +384,10 @@ export class AudioMixer {
       return SILENT_LEVEL
     }
     const raw = analyseTimeDomain(buffer)
-    return { ...raw, rms: smoothMeter(previous, raw.rms) }
+    const rms = smoothMeter(previous, raw.rms)
+    // dB follows the smoothed level, as the worklet path does, so the two
+    // never disagree while a meter falls.
+    return { ...raw, rms, db: toDb(rms) }
   }
 
   /**
@@ -408,6 +418,7 @@ export class AudioMixer {
     }
     this.programMeter = null
     this.workletReady = false
+    this.graphSetup = null
     this.mixBus = null
     this.masterGain = null
     this.programAnalyser = null

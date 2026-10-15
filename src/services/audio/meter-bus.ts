@@ -59,8 +59,9 @@ class MeterBus {
 
   /** Called when a channel is removed, so meters settle at silence. */
   reset(channelId: string): void {
-    this.latest.delete(channelId)
+    // Tell listeners the channel went silent, then forget it entirely.
     this.publish(channelId, SILENT_LEVEL)
+    this.latest.delete(channelId)
   }
 
   clear(): void {
