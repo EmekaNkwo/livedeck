@@ -335,13 +335,18 @@ export async function dispatch(ctx: HandlerContext, request: ParsedRequest): Pro
 }
 
 /** The socket went away: keep the participant for a grace period. */
-export function onSessionClosed(ctx: HandlerContext): void {
+export function onSessionClosed(ctx: HandlerContext, options: { intentional?: boolean } = {}): void {
   const { peer, room } = ctx.session
   ctx.session.peer = null
   ctx.session.room = null
   if (!peer || !room) return
   // Another socket already owns this participant: nothing to detach.
   if (!peer.isAttachedTo(ctx.session.send)) return
+  if (options.intentional) {
+    room.removePeer(peer.id)
+    ctx.rooms.reapIfEmpty(room.name)
+    return
+  }
   peer.detach(() => {
     if (room.isClosed || peer.isClosed) return
     room.removePeer(peer.id)

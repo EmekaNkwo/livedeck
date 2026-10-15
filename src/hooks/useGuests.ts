@@ -317,7 +317,8 @@ function describeGuestStatus(peer: PeerState | null): string {
   if (!peer) return 'Not in the room'
   switch (peer.status) {
     case 'connected':
-      return peer.hasRemoteVideo || peer.hasRemoteAudio ? 'Connected' : 'In the room — no media yet'
+      // Media arrival is shown separately on the tile; this is the connection.
+      return 'Connected'
     case 'connecting':
       return 'Connecting to the media server'
     case 'reconnecting':

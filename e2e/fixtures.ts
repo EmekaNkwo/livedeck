@@ -49,6 +49,46 @@ export async function sessionControl(
   )
 }
 
+/**
+ * Record every WebSocket the page opens, so a test can cut them.
+ *
+ * Offline emulation does not close a socket that is already open to
+ * localhost, so it cannot simulate a network drop on its own.
+ */
+export async function trackSockets(target: Page | BrowserContext): Promise<void> {
+  await target.addInitScript(() => {
+    const Native = window.WebSocket
+    const sockets: WebSocket[] = []
+    ;(window as unknown as { __sockets: WebSocket[] }).__sockets = sockets
+    window.WebSocket = class extends Native {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols)
+        sockets.push(this)
+      }
+    } as typeof WebSocket
+  })
+}
+
+/**
+ * Close the media-server socket as a network failure would (not code 1000).
+ *
+ * Only `/signal`: closing Vite's dev-server socket too makes Vite reload the
+ * whole page when the network returns, which tests a reload, not a resume.
+ */
+export async function dropSockets(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const sockets = (window as unknown as { __sockets?: WebSocket[] }).__sockets ?? []
+    let closed = 0
+    for (const socket of sockets) {
+      if (socket.readyState === WebSocket.OPEN && new URL(socket.url).pathname === '/signal') {
+        socket.close(4000, 'simulated-drop')
+        closed += 1
+      }
+    }
+    return closed
+  })
+}
+
 /** The participant id the page joined as, once joined. */
 export async function selfParticipantId(page: Page): Promise<string | null> {
   return page.evaluate(() => {

@@ -68,9 +68,18 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
     if (import.meta.env.DEV) (window as unknown as { __livedeckSession?: MediaSession }).__livedeckSession = session
     const detach = attach(session)
     const offError = session.on('error', (message) => showToastRef.current(message, 'error'))
-    void session.start({ room, label, key, role, claim }).catch(() => {
-      // Reported through the error event and the snapshot's `error`.
-    })
+    /*
+     * Started on the next task, not now. React StrictMode mounts, unmounts
+     * and remounts effects synchronously in development; a session started
+     * immediately would connect, claim the room, and then sit in the server's
+     * resume window while the real session joined behind it as a guest.
+     * Deferring means the throwaway mount is cancelled before it dials.
+     */
+    const startTimer = setTimeout(() => {
+      void session.start({ room, label, key, role, claim }).catch(() => {
+        // Reported through the error event and the snapshot's `error`.
+      })
+    }, 0)
 
     const quality = new QualityController(session, {
       onReport: (report, perParticipant) => {
@@ -92,6 +101,7 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
     document.addEventListener('visibilitychange', onWake)
 
     return () => {
+      clearTimeout(startTimer)
       window.removeEventListener('online', onWake)
       document.removeEventListener('visibilitychange', onWake)
       quality.stop()

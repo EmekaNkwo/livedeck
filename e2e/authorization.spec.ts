@@ -1,5 +1,14 @@
 import { expect, test, type Browser, type Page } from '@playwright/test'
-import { guestTiles, openDirector, openTab, selfParticipantId, sessionControl, useMediaServer } from './fixtures'
+import {
+  dropSockets,
+  guestTiles,
+  openDirector,
+  openTab,
+  selfParticipantId,
+  sessionControl,
+  trackSockets,
+  useMediaServer,
+} from './fixtures'
 
 /**
  * Scenario I — who may control whom, and what survives a dropped network.
@@ -18,6 +27,7 @@ import { guestTiles, openDirector, openTab, selfParticipantId, sessionControl, u
 async function joinAsGuest(browser: Browser, room: string, name: string): Promise<Page> {
   const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
   await useMediaServer(context)
+  await trackSockets(context)
   const page = await context.newPage()
   await page.goto(`/push/${room}`)
   await page.getByLabel('Your name').fill(name)
@@ -91,8 +101,14 @@ test.describe('Scenario I: authorization and recovery', () => {
     await expect(guestTiles(page)).toHaveCount(1, { timeout: 30_000 })
     const before = await selfParticipantId(guest)
 
+    // Cut the network: offline for new connections, and the open socket
+    // closed the way a drop closes it. The server keeps Cleo for the resume
+    // window; the client backs off and retries.
     await guest.context().setOffline(true)
-    await expect(guest.locator('header').getByText(/Reconnecting|Connecting|Connection failed/)).toBeVisible({ timeout: 30_000 })
+    expect(await dropSockets(guest)).toBeGreaterThan(0)
+    await expect(guest.locator('header').getByText('Reconnecting')).toBeVisible({ timeout: 15_000 })
+    // While Cleo is away the director still shows one tile, not zero.
+    await expect(guestTiles(page)).toHaveCount(1)
     await guest.context().setOffline(false)
 
     await expect(guest.locator('header').getByText(/^Connected/)).toBeVisible({ timeout: 45_000 })

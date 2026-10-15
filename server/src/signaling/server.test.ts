@@ -94,7 +94,8 @@ class TestClient {
     if (this.socket.readyState === WebSocket.CLOSED) return
     await new Promise<void>((resolve) => {
       this.socket.once('close', () => resolve())
-      this.socket.close()
+      // 1000, as the browser client sends on Leave or unmount.
+      this.socket.close(1000, 'client-closed')
     })
   }
 
@@ -364,6 +365,19 @@ describe('reconnection', () => {
     await resumedClient.request('restartIce', { transportId: send.id })
     expect(b.has('participantLeft')).toBe(false)
     expect(b.notifications.filter((n) => n.event === 'participantJoined')).toHaveLength(0)
+  })
+
+  it('a clean close leaves at once; only a drop is held for resume', async () => {
+    const { client: a } = await joinAs('A')
+    const { client: b } = await joinAs('B')
+    await b.close()
+    await a.waitFor('participantLeft')
+    const { client: c, joined } = await joinAs('C')
+    c.terminate()
+    // Dropped, not closed: still in the room during the grace window.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(rooms.get('studio')?.peers.has(joined.participantId)).toBe(true)
+    expect(a.notifications.filter((n) => n.event === 'participantLeft')).toHaveLength(1)
   })
 
   it('a stale token joins fresh rather than failing', async () => {

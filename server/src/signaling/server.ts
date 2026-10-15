@@ -180,11 +180,14 @@ export function attachSignaling(httpServer: Server, options: SignalingOptions): 
       connection.awaitingPong = false
     })
 
-    socket.on('close', () => {
+    socket.on('close', (code: number) => {
       clearTimeout(connection.joinTimer)
       connections.delete(connection)
       connectionLimiter.release(address)
-      onSessionClosed(ctx)
+      // 1000 is a deliberate close by the client (tab closed, Leave, page
+      // unmount): the participant is gone. Anything else is a network drop
+      // and keeps the participant for the resume window.
+      onSessionClosed(ctx, { intentional: code === 1000 })
       log('disconnected', { session: session.id })
     })
 

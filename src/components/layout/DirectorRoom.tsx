@@ -200,10 +200,18 @@ export function DirectorRoom({ room, media }: DirectorRoomProps) {
    *
    * A guest seeing a genuine on-air tally is the single most useful thing a
    * director can send them, and it costs one message per state change.
+   *
+   * Keyed on the stable callback and the guest count, never on the control
+   * object: that is rebuilt every render, and broadcasting on every render
+   * drained the server's control rate limit so real cues were refused.
+   * A guest joining later is told on the count change.
    */
+  const broadcastOnAir = director.broadcastOnAir
+  const guestCount = guests.guests.length
   useEffect(() => {
-    void director.broadcastOnAir(recording.isRecording)
-  }, [director, recording.isRecording])
+    if (guestCount === 0) return
+    void broadcastOnAir(recording.isRecording)
+  }, [broadcastOnAir, guestCount, recording.isRecording])
 
   const configuredServerUrl = useSettingsStore((state) => state.settings.signalingServerUrl)
   const serverUrl = resolveRelayUrl(configuredServerUrl)

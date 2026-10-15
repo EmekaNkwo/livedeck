@@ -76,7 +76,11 @@ test.describe('Scenario E: room-based joining', () => {
         host.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i),
       ).toBeVisible({ timeout: 30_000 })
 
+      // Joining switches nothing on, so the camera is turned on in the lobby:
+      // the assertion at the end is about one guest *video* source.
       const joinAs = async (name: string) => {
+        const cameraOn = guest.getByRole('button', { name: 'Turn camera on' })
+        if (await cameraOn.isVisible()) await cameraOn.click()
         await guest.getByLabel('Your name').fill(name)
         await guest.getByRole('button', { name: /Join room/i }).click()
       }
@@ -101,6 +105,7 @@ test.describe('Scenario E: room-based joining', () => {
       await guest.reload()
       await joinAs('Ana')
       await expect(guestTiles(host)).toHaveCount(1, { timeout: 45_000 })
+      await expect(guestTiles(host).first()).not.toContainText('No video', { timeout: 45_000 })
 
       // And exactly one guest video source in the scene, never two.
       await openTab(host, /Sources/)
