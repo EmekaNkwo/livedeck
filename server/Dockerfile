@@ -41,6 +41,10 @@ WORKDIR /app
 COPY --from=deps /app/server/node_modules ./server/node_modules
 COPY server ./server
 COPY shared ./shared
+# `shared/` imports zod and resolves it from its own directory upwards, which
+# reaches /app — not /app/server, where the dependencies are. Link them, as
+# the runtime stage does.
+RUN ln -s /app/server/node_modules /app/node_modules
 WORKDIR /app/server
 RUN npm run build
 
