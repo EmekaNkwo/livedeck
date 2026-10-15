@@ -1,118 +1,69 @@
 import { createServer } from 'node:http'
-import next from 'next'
-import { attachSignaling, normalizeOrigin } from './signaling'
-import { createTurnRoute } from './turn-route'
-import { createTurnProvider, readTurnConfig } from './turn'
+import { createHttpHandler } from './http'
+import { readMediasoupConfig } from './mediasoup/config'
+import { createWorkerPool } from './mediasoup/worker-pool'
+import { createRoomManager } from './rooms/room-manager'
+import { createKeyService, readOrGenerateSecret } from './signaling/authorization'
+import { attachSignaling, normalizeOrigin } from './signaling/server'
+import { createTurnProvider, readTurnConfig } from './turn/credentials'
 
 /**
- * The signaling host: Next.js plus a WebSocket relay in one Node process.
+ * The LiveDeck media server: HTTP + WebSocket signaling + mediasoup, in one
+ * Node process.
  *
- * Next is run programmatically so the same HTTP server can own the `upgrade`
- * event. A Next route handler cannot do this — handlers are per-request, and on
- * a serverless platform the process does not outlive the response, whereas a
- * relay is a long-lived process holding in-memory room state.
- *
- * Deploy target: a container or VM (Fly, Render, Railway, a VPS). **Not**
- * Vercel's serverless runtime, which cannot hold a WebSocket open.
+ * It holds room state and media routers in memory, so it needs a persistent
+ * host with a reachable UDP/TCP media port — a container or VM, not a
+ * serverless runtime. See `mediasoup/config.ts` for the ports.
  */
+
+const log = (event: string, detail?: Record<string, unknown>) => {
+  console.info(`[livedeck] ${event}${detail ? ` ${JSON.stringify(detail)}` : ''}`)
+}
 
 const port = Number(process.env.PORT ?? 3001)
-
-/*
- * Bind address.
- *
- * Deliberately *not* `HOSTNAME`: on Windows that variable already holds the
- * machine name, so reading it bound the server to `HAYMAYKUS` instead of every
- * interface — and `http://localhost:3001`, the address the README and the
- * studio's settings hint both tell you to use, did not reach it. `HOST` is the
- * conventional name for this and is not pre-set by the shell.
- */
+// Deliberately HOST, not HOSTNAME: Windows pre-sets HOSTNAME to the machine
+// name, which would bind the server to an address localhost cannot reach.
 const hostname = process.env.HOST ?? '0.0.0.0'
-
-/**
- * Production is opted into by a flag as well as `NODE_ENV`.
- *
- * `NODE_ENV=production node …` in an npm script only works on POSIX shells — it
- * is a syntax error on Windows `cmd`, which would make `npm start` silently run
- * the dev server there. The flag works everywhere, and `NODE_ENV` is still
- * honoured for hosts that set it themselves.
- */
-const dev = process.env.NODE_ENV !== 'production' && !process.argv.includes('--prod')
-
-/*
- * Next reads `NODE_ENV` directly in places, so keep the two in agreement.
- *
- * Next's types declare it read-only to discourage exactly this, but the flag
- * above is the only portable way to express "production" in an npm script, and
- * leaving the variable unset would have Next build dev-mode assets.
- */
-if (!dev) (process.env as Record<string, string | undefined>).NODE_ENV = 'production'
-
-/**
- * Allowed browser origins, comma-separated.
- *
- * Unset means "allow any", which is right for local development and wrong for
- * a public deployment — an open relay lets anyone use your bandwidth to
- * bootstrap their own calls.
- */
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((entry) => entry.trim())
   .filter(Boolean)
 
 async function main(): Promise<void> {
-  const app = next({ dev, hostname, port })
-  const handle = app.getRequestHandler()
-  await app.prepare()
+  const mediasoupConfig = readMediasoupConfig(process.env)
+  const pool = await createWorkerPool(mediasoupConfig, log)
+  const rooms = createRoomManager({ pool, config: mediasoupConfig, log })
 
-  const httpServer = createServer((request, response) => {
-    void handle(request, response)
-  })
+  const { secret, generated } = readOrGenerateSecret(process.env)
+  const keys = createKeyService(secret)
+
+  const turnConfig = readTurnConfig(process.env)
+  const turn = turnConfig ? createTurnProvider(turnConfig) : null
+
+  const httpServer = createServer(
+    createHttpHandler(() => ({
+      ...rooms.stats(),
+      connections: signaling.connections(),
+      workers: pool.slots.length,
+      turn: turnConfig?.kind ?? 'none',
+    })),
+  )
 
   const signaling = attachSignaling(httpServer, {
     path: '/signal',
     allowedOrigins,
+    trustProxy: process.env.TRUST_PROXY === 'true',
+    rooms,
+    keys,
+    turn,
+    log,
   })
 
-  /*
-   * TURN credentials, minted here because the API token must not reach the
-   * browser. Absent configuration is a supported state — the route answers
-   * `configured: false` and the studio stays STUN-only.
-   */
-  const turnConfig = readTurnConfig(process.env)
-  const turnRoute = createTurnRoute({
-    provider: turnConfig ? createTurnProvider(turnConfig) : null,
-    allowedOrigins,
-  })
-
-  // Endpoints ahead of Next, so a load balancer gets a cheap answer, room
-  // counts are observable without a dashboard, and `/ice-servers` is not
-  // shadowed by a Next 404.
-  httpServer.prependListener('request', (request, response) => {
-    if (turnRoute.handle(request, response)) return
-    if (request.url !== '/healthz') return
-    const stats = signaling.registry.stats()
-    response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ ok: true, turn: turnConfig !== null, ...stats }))
-  })
-
-  /*
-   * Reap upgrades nobody claimed.
-   *
-   * Node leaves an unhandled `upgrade` socket open indefinitely — neither the
-   * relay nor Next responds to, say, `wss://host/nonsense`, so the connection
-   * sits there consuming a file descriptor. Repeated, that is a cheap way to
-   * exhaust the process.
-   *
-   * This listener is registered *after* the real handlers, so by the time the
-   * timer fires anyone who wanted the socket has already written a handshake
-   * response to it. `bytesWritten === 0` therefore means unclaimed.
-   */
+  // Reap upgrades nobody claimed, so a stray `wss://host/nonsense` does not
+  // hold a file descriptor forever.
   httpServer.on('upgrade', (_request, socket) => {
     setTimeout(() => {
       if (socket.destroyed) return
-      // `upgrade` hands over a Duplex; the underlying net.Socket is what
-      // tracks bytes, so this is narrowed rather than asserted blindly.
       const written = (socket as { bytesWritten?: number }).bytesWritten
       if (typeof written === 'number' && written > 0) return
       socket.destroy()
@@ -120,62 +71,40 @@ async function main(): Promise<void> {
   })
 
   httpServer.listen(port, hostname, () => {
-    console.log(`[livedeck-signaling] http://${hostname}:${port}`)
-    console.log(`[livedeck-signaling] websocket path /signal`)
-    /*
-     * Say which mode TURN is in on startup.
-     *
-     * Without this line, a typo in the key id is indistinguishable from not
-     * having configured TURN at all, and both look identical from the browser:
-     * no relay candidates, connections that fail on restrictive networks.
-     */
-    if (turnConfig) {
-      console.log(
-        `[livedeck-signaling] TURN: Cloudflare key ${turnConfig.keyId.slice(0, 8)}…, ` +
-          `ttl ${turnConfig.ttlSeconds}s, served at GET /ice-servers`,
-      )
-    } else {
-      console.log(
-        '[livedeck-signaling] TURN: not configured (STUN only). Set ' +
-          'CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN to enable relay.',
+    log('listening', { url: `http://${hostname}:${port}`, signaling: '/signal' })
+    log('mediasoup', {
+      workers: mediasoupConfig.numWorkers,
+      mediaPorts: `${mediasoupConfig.port}-${mediasoupConfig.port + mediasoupConfig.numWorkers - 1}`,
+      announcedAddress: mediasoupConfig.announcedAddress ?? '(unset — set MEDIASOUP_ANNOUNCED_ADDRESS for anything but localhost)',
+      udp: mediasoupConfig.enableUdp,
+      tcp: mediasoupConfig.enableTcp,
+    })
+    log('turn', turnConfig ? { provider: turnConfig.kind, ttlSeconds: turnConfig.ttlSeconds } : { provider: 'none (STUN only)' })
+    if (generated) {
+      console.warn(
+        '[livedeck] ROOM_KEY_SECRET is unset: room keys were generated for this run and every director link stops working on restart. Set it before deploying.',
       )
     }
     if (allowedOrigins.length === 0) {
-      console.warn(
-        '[livedeck-signaling] ALLOWED_ORIGINS is unset: any origin may connect. ' +
-          'Set it before exposing this publicly.',
-      )
+      console.warn('[livedeck] ALLOWED_ORIGINS is unset: any origin may connect. Set it before exposing this publicly.')
     } else {
-      /*
-       * Log the *normalized* list, not the raw variable.
-       *
-       * A browser that is refused shows only "WebSocket connection failed" —
-       * it hides the handshake's HTTP status by design — so the allow-list is
-       * effectively invisible from the client when it is wrong. Printing what
-       * the server will actually compare against turns that into a one-glance
-       * check, and shows up the common mistakes: a trailing slash copied from
-       * an address bar, `http` where the studio is served over `https`, or the
-       * relay's own address instead of the studio's.
-       */
-      console.log(
-        `[livedeck-signaling] allowed origins: ${allowedOrigins.map(normalizeOrigin).join(', ')}`,
-      )
+      log('allowed-origins', { origins: allowedOrigins.map(normalizeOrigin) })
     }
   })
 
   const shutdown = async (signal: string) => {
-    console.log(`[livedeck-signaling] ${signal} — shutting down`)
+    log('shutdown', { signal })
     await signaling.close()
+    rooms.closeAll()
+    await pool.close()
     httpServer.close(() => process.exit(0))
-    // Do not wait forever for lingering keep-alive sockets.
     setTimeout(() => process.exit(0), 5000).unref()
   }
-
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
   process.on('SIGINT', () => void shutdown('SIGINT'))
 }
 
 void main().catch((error: unknown) => {
-  console.error('[livedeck-signaling] failed to start', error)
+  console.error('[livedeck] failed to start', error)
   process.exit(1)
 })

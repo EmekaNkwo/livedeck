@@ -1,7 +1,7 @@
 # Docker build context, for `server/Dockerfile`.
 #
 # The context is the repository ROOT, because the relay's source imports
-# `../../shared/signaling-protocol`. That means the studio's whole tree is in
+# `../../shared/*`. That means the studio's whole tree is in
 # scope by default, so most of this file is about keeping it out — a smaller
 # context is a faster upload and a better layer cache.
 #
@@ -16,8 +16,6 @@
 # would produce an image whose contents depend on whoever ran docker build.
 dist
 server/dist
-server/.next
-.next
 
 # Local environment. Secrets and ports belong in the host's configuration, not
 # baked into a layer where anyone who can pull the image can read them.

@@ -1,28 +1,28 @@
 {
-  "name": "livedeck-signaling",
+  "name": "livedeck-server",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "engines": {
     "node": ">=20.9"
   },
-  "description": "Optional room-based WebRTC signaling relay for LiveDeck Studio. Next.js + ws.",
+  "description": "LiveDeck media server: WebSocket signaling plus a mediasoup SFU in one process.",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "next build && tsc -p tsconfig.build.json",
-    "start": "node dist/server/src/server.js --prod",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server/src/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "next": "^16.4.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "ws": "^8.22.0"
+    "mediasoup": "^3.29.0",
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
-    "@types/react": "^19.3.0",
     "@types/ws": "^8.18.2",
+    "@vitest/coverage-v8": "^5.0.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"

@@ -1,51 +1,47 @@
-# Render blueprint for the signaling relay.
+# Render blueprint for the LiveDeck media server.
 #
-# Commit this and point Render at the repository (New → Blueprint), or set the
-# same values by hand on a Docker web service. Either way the two fields that
-# are easy to get wrong are `dockerfilePath` and `dockerContext`: the relay
-# compiles `shared/` from the repository root, so the build context has to be
-# the root rather than `server/`.
+# READ THIS BEFORE DEPLOYING HERE
+# -------------------------------
+# The server is now an SFU: every participant's audio and video terminates in
+# this process, over UDP (with a TCP fallback) on the mediasoup media ports.
+# Render web services publish exactly one HTTP port and do not expose UDP, so
+# on Render the media path is limited to TCP via a TURN relay in front of the
+# SFU, which is a worse experience than direct UDP. A host that publishes UDP
+# ports — Fly.io, Railway with TCP/UDP proxies, Hetzner/DigitalOcean/any VPS,
+# or Kubernetes with a hostPort/NodePort — is the right home for this service.
 #
-# The studio itself is static and is not described here — it deploys to any
-# static host. Only the relay needs a persistent process.
+# This blueprint is kept so the HTTP/WebSocket half still deploys here for
+# evaluation. For real broadcasts, run the container where UDP is reachable.
+#
+# The studio itself is static and is not described here.
 
 services:
   - type: web
-    name: livedeck-signaling
+    name: livedeck-server
     runtime: docker
     dockerfilePath: ./server/Dockerfile
-    # The repository root. See the note above and the header of the Dockerfile.
+    # The repository root: `server/src` imports `../../shared/*`.
     dockerContext: .
-    #
-    # `rootDir` is deliberately NOT set. It re-roots every other path, so
-    # pointing it at `server/` — the intuitive thing for a service that lives
-    # there — makes the two paths above resolve inside `server/server/` and
-    # leaves `shared/` outside the build context, which fails the build on
-    # three COPY steps with `"/shared": not found`. If you configure this
-    # service by hand instead of from this blueprint, leave Root Directory
-    # blank.
     plan: starter
     region: oregon
-
-    # The relay's own endpoint, ahead of Next, so a pass means the relay is up
-    # rather than merely that something is answering the port.
     healthCheckPath: /healthz
-
-    # A WebSocket relay keeps room state in one process's memory. More than one
-    # instance would split rooms across them — two guests given the same room
-    # name could land on different instances and never find each other — so
-    # scaling out needs shared state (Redis) and sticky sessions first. See
-    # README › It will not run on Vercel's serverless runtime.
+    # Rooms and routers live in one process's memory. Scaling out needs a
+    # room-to-instance mapping first.
     numInstances: 1
 
     envVars:
-      # Which browser origins may open a socket. UNSET MEANS ANY ORIGIN, which
-      # is fine on a laptop and wrong on the public internet: an open relay
-      # lets anyone use your bandwidth to bootstrap their own calls. Set this
-      # to wherever the studio is served from.
       - key: ALLOWED_ORIGINS
         sync: false
-
-      # PORT is injected by Render and must not be pinned here.
-      # HOST defaults to 0.0.0.0 in the image, which is what Render's router
-      # needs — do not set it to localhost.
+      - key: ROOM_KEY_SECRET
+        generateValue: true
+      - key: MEDIASOUP_ANNOUNCED_ADDRESS
+        sync: false
+      - key: MEDIASOUP_WORKERS
+        value: "1"
+      - key: TRUST_PROXY
+        value: "true"
+      # TURN: set one of the two options from server/.env.example.
+      - key: CLOUDFLARE_TURN_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_TURN_API_TOKEN
+        sync: false
