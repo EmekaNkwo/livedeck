@@ -12,6 +12,7 @@ import {
   revokeTrackedUrl,
   toSafeFilename,
 } from '@/services/persistence/object-urls'
+import { recoverInterruptedRecordings } from '@/services/recording/recovery'
 import { useRecordingStore } from '@/stores/recordingStore'
 import { useStudioStore } from '@/stores/studioStore'
 
@@ -67,6 +68,13 @@ export function useRecordingLibrary(): UseRecordingLibrary {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
+      const recovered = await recoverInterruptedRecordings()
+      if (recovered > 0) {
+        showToast(
+          `Recovered ${recovered} recording${recovered === 1 ? '' : 's'} that ${recovered === 1 ? 'was' : 'were'} interrupted. Check the library.`,
+          'info',
+        )
+      }
       const stored = await listRecordings()
       // Merge: keep in-memory-only entries that are not in IndexedDB, so a
       // recording that failed to persist does not vanish from the list.
@@ -83,7 +91,7 @@ export function useRecordingLibrary(): UseRecordingLibrary {
       setLibraryLoaded(true)
     }
     setStorage(await estimateStorage())
-  }, [setEntries, setLibraryLoaded])
+  }, [setEntries, setLibraryLoaded, showToast])
 
   useEffect(() => {
     if (libraryLoaded) {

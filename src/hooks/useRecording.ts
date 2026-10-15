@@ -5,7 +5,17 @@ import { audioMixer } from '@/services/audio/audio-mixer'
 import { recordingEngine } from '@/services/recording/recording-engine'
 import type { RecordingResult } from '@/services/recording/recording-engine'
 import { listSupportedFormats, selectRecordingFormat } from '@/services/recording/mime'
-import { QuotaExceededError, saveRecording } from '@/services/persistence/recording-store'
+import { patchWebmDuration } from '@/services/recording/webm-duration'
+import {
+  appendChunk,
+  beginRecording,
+  deleteRecording,
+  estimateStorage,
+  finishRecording,
+  loadChunk,
+  loadRecordingBlob,
+  requestPersistentStorage,
+} from '@/services/persistence/recording-store'
 import { createRecordingId } from '@/utils/id'
 import { formatTimestamp } from '@/utils/format'
 import { useRecordingStore } from '@/stores/recordingStore'
@@ -20,9 +30,19 @@ import { useSettingsStore } from '@/stores/settingsStore'
  * sources, mutes, fader moves — is in the file because there is no second
  * render or mix path.
  *
- * Nothing reports success early: the entry is only added to the library after
- * MediaRecorder has fired `stop` and produced a non-empty blob.
+ * STORAGE
+ * -------
+ * The library row is opened before the first frame, every timeslice goes
+ * straight to IndexedDB, and the row is marked complete only after the last
+ * chunk has landed. The browser never holds the recording in memory, and an
+ * interrupted recording is recovered from its chunks on the next load.
+ *
+ * On completion the WebM header is patched with the real duration, so the
+ * file reports its length and seeks instead of showing `Infinity`.
  */
+
+/** Refuse to start with less headroom than this. */
+const MIN_FREE_BYTES = 200 * 1024 * 1024
 
 export type UseRecording = {
   status: RecordingStatus
@@ -64,85 +84,70 @@ export function useRecording(): UseRecording {
   const supportedFormats = useMemo(() => listSupportedFormats(), [])
   const canRecord = supportedFormats.length > 0
 
-  // Session metadata is read inside the completion callback, which outlives the
-  // render that registered it, so it is mirrored into a ref.
   const sessionRef = useRef(session)
   sessionRef.current = session
+  /** The row being written, for the duration of one recording. */
+  const activeRef = useRef<RecordingEntry | null>(null)
 
-  /**
-   * Persist a finished recording.
-   *
-   * On quota exhaustion the blob is kept in memory and the entry is marked
-   * `persisted: false`, so the user can still download it. Nothing is silently
-   * dropped, and nothing is uploaded anywhere.
-   */
   const handleComplete = useCallback(
     async (result: RecordingResult) => {
-      const id = createRecordingId()
-      const entry: RecordingEntry = {
-        id,
-        sessionId: sessionRef.current?.id ?? 'unknown',
-        name: `${sessionRef.current?.name ?? 'LiveDeck'} — ${formatTimestamp(Date.now())}`,
-        mimeType: result.mimeType,
-        extension: result.extension,
-        size: result.blob.size,
-        durationMs: result.durationMs,
-        width: result.width,
-        height: result.height,
-        frameRate: result.frameRate,
-        createdAt: Date.now(),
-        persisted: false,
-      }
+      const active = activeRef.current
+      activeRef.current = null
+      compositor.lockSize(false)
+      if (!active) return
 
+      let durationMs = result.durationMs
+      let size = result.bytes
       try {
-        await saveRecording(entry, result.blob)
-        addEntry({ ...entry, persisted: true }, result.blob)
+        // Patch the duration into the stored header so the file reports its
+        // length. The patched header replaces chunk 0; the body is untouched.
+        const whole = await loadRecordingBlob(active.id)
+        if (whole && result.mimeType.includes('webm')) {
+          const patched = await patchWebmDuration(whole, durationMs)
+          if (patched.patched) {
+            // Only the leading bytes changed; rewrite chunk 0 with the new
+            // header plus whatever of the original chunk 0 followed it.
+            const headerLength = patched.blob.size - whole.size + (await firstChunkSize(active.id))
+            await appendChunk(active.id, 0, patched.blob.slice(0, headerLength), Date.now())
+            size = patched.blob.size
+          }
+        }
+        await finishRecording(active.id, {
+          durationMs,
+          size,
+          mimeType: result.mimeType,
+          extension: result.extension,
+        })
+        addEntry({ ...active, durationMs, size, mimeType: result.mimeType, extension: result.extension, persisted: true })
         showToast('Recording saved to this device.', 'success')
       } catch (persistError) {
-        addEntry(entry, result.blob)
-        if (persistError instanceof QuotaExceededError) {
-          setError({
-            code: 'quota-exceeded',
-            message:
-              'There was not enough storage to keep this recording. It is ready to download, but ' +
-              'it will be lost if you reload the page.',
-            recoverable: true,
-            at: Date.now(),
-          })
-        } else {
-          setError({
-            code: 'persist-failed',
-            message:
-              'The recording could not be stored for later. It is ready to download, but it will ' +
-              'be lost if you reload the page.',
-            recoverable: true,
-            at: Date.now(),
-          })
-        }
+        durationMs = result.durationMs
+        setError({
+          code: 'persist-failed',
+          message:
+            persistError instanceof Error
+              ? persistError.message
+              : 'The recording could not be finalized in storage.',
+          recoverable: true,
+          at: Date.now(),
+        })
       }
-
-      /*
-       * Deliberately NOT auto-selecting this entry for preview.
-       *
-       * The preview player needs an object URL, which only the library hook
-       * creates (it owns that URL's lifetime and revocation). Setting the
-       * preview id from here would render the player section with no source —
-       * an empty, broken-looking panel. The library's Preview button loads the
-       * blob and the URL together.
-       */
       setStatus('complete')
     },
     [addEntry, setError, setStatus, showToast],
   )
 
-  /** Wire engine callbacks once; they write to the store, not to local state. */
   useEffect(() => {
     recordingEngine.setEvents({
       onStatusChange: setStatus,
       onTick: setElapsed,
       onError: (recordingError) => {
+        compositor.lockSize(false)
         setError(recordingError)
         setStatus('error')
+        // Whatever reached storage is kept as an interrupted recording the
+        // library can recover; the row is not deleted.
+        activeRef.current = null
       },
       onComplete: (result) => void handleComplete(result),
     })
@@ -164,29 +169,71 @@ export function useRecording(): UseRecording {
       })
       return
     }
-
     setError(null)
 
-    // The AudioContext may still be suspended if the operator has not
-    // interacted with an audio control yet. Resume it here — this call is
-    // inside a click handler, so the browser allows it — otherwise the
-    // recording would come out silent.
+    const storage = await estimateStorage()
+    if (storage && storage.quota > 0 && storage.quota - storage.usage < MIN_FREE_BYTES) {
+      setError({
+        code: 'quota-exceeded',
+        message: `Only ${Math.round((storage.quota - storage.usage) / 1024 / 1024)} MB of storage is free. Delete old recordings before starting a new one.`,
+        recoverable: true,
+        at: Date.now(),
+      })
+      return
+    }
+    void requestPersistentStorage()
+
     await audioMixer.resume()
     const audioStream = audioMixer.getProgramStream()
+    if (!audioStream) showToast('Recording video only — the audio mixer is not available.', 'info')
 
-    if (!audioStream) {
-      showToast('Recording video only — the audio mixer is not available.', 'info')
+    const id = createRecordingId()
+    const startedAt = Date.now()
+    const entry: RecordingEntry = {
+      id,
+      sessionId: sessionRef.current?.id ?? 'unknown',
+      name: `${sessionRef.current?.name ?? 'LiveDeck'} — ${formatTimestamp(startedAt)}`,
+      mimeType: selectRecordingFormat()?.mimeType ?? 'video/webm',
+      extension: selectRecordingFormat()?.extension ?? 'webm',
+      size: 0,
+      durationMs: 0,
+      width: canvas.width,
+      height: canvas.height,
+      frameRate,
+      createdAt: startedAt,
+      persisted: true,
     }
+    try {
+      await beginRecording(entry, startedAt)
+    } catch (storeError) {
+      setError({
+        code: 'persist-failed',
+        message:
+          storeError instanceof Error
+            ? `Storage is unavailable, so the recording cannot be kept: ${storeError.message}`
+            : 'Storage is unavailable, so the recording cannot be kept.',
+        recoverable: true,
+        at: Date.now(),
+      })
+      return
+    }
+    activeRef.current = entry
 
+    compositor.lockSize(true)
     const started = await recordingEngine.start({
       canvas,
       audioStream,
       frameRate,
+      sink: (index, chunk, at) => appendChunk(id, index, chunk, at),
     })
 
     if (started) {
       setElapsed(0)
       setFormat(recordingEngine.getFormat())
+    } else {
+      compositor.lockSize(false)
+      activeRef.current = null
+      void deleteRecording(id).catch(() => undefined)
     }
   }, [frameRate, setElapsed, setError, setFormat, showToast])
 
@@ -194,7 +241,6 @@ export function useRecording(): UseRecording {
   const pause = useCallback(() => recordingEngine.pause(), [])
   const resume = useCallback(() => recordingEngine.resume(), [])
 
-  /** Discarding recorded footage is irreversible, so confirm it. */
   const cancel = useCallback(() => {
     requestConfirm({
       title: 'Discard this recording?',
@@ -202,7 +248,11 @@ export function useRecording(): UseRecording {
       confirmLabel: 'Discard recording',
       destructive: true,
       onConfirm: () => {
+        const active = activeRef.current
+        activeRef.current = null
         recordingEngine.cancel()
+        compositor.lockSize(false)
+        if (active) void deleteRecording(active.id).catch(() => undefined)
         setElapsed(0)
         setStatus('idle')
       },
@@ -210,11 +260,9 @@ export function useRecording(): UseRecording {
   }, [requestConfirm, setElapsed, setStatus])
 
   /**
-   * Warn before a reload or close while recording.
-   *
-   * The browser will not let us finalize a file during `beforeunload`, so the
-   * honest thing is to warn that the recording will be lost rather than
-   * pretend it can be saved.
+   * Warn before a reload or close while recording. The chunks already stored
+   * survive and are recovered on the next load, but the last slice and the
+   * duration header are not written until `stop`.
    */
   useEffect(() => {
     if (status !== 'recording' && status !== 'paused') return
@@ -242,4 +290,9 @@ export function useRecording(): UseRecording {
     cancel,
     dismissError: () => setError(null),
   }
+}
+
+async function firstChunkSize(recordingId: string): Promise<number> {
+  const chunk = await loadChunk(recordingId, 0)
+  return chunk?.size ?? 0
 }

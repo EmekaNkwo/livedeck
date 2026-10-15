@@ -18,22 +18,33 @@ import {
  * crops, hidden sources, mutes and fader moves are all in the file by
  * construction, because there is no separate render or mix for recording.
  *
+ * WHERE THE DATA GOES
+ * -------------------
+ * Nowhere in this process. Every timeslice is handed to the {@link ChunkSink}
+ * the caller supplied and forgotten; the engine never holds more than the
+ * chunk in flight. A two-hour recording costs the same memory as a two-second
+ * one, and a crash loses at most the last slice.
+ *
  * HONESTY
  * -------
  * `status` only reaches `'complete'` after MediaRecorder has fired `stop` and
- * the blob has been assembled. Nothing here reports success before the browser
- * has actually produced data.
+ * the last chunk has reached the sink. Nothing here reports success before the
+ * browser has actually produced data.
  */
 
 export type RecordingResult = {
-  blob: Blob
   mimeType: string
   extension: string
   durationMs: number
   width: number
   height: number
   frameRate: number
+  chunkCount: number
+  bytes: number
 }
+
+/** Where chunks go. Rejecting stops the recording with `persist-failed`. */
+export type ChunkSink = (index: number, chunk: Blob, at: number) => Promise<void>
 
 export type RecordingEngineEvents = {
   onStatusChange: (status: RecordingStatus) => void
@@ -48,18 +59,28 @@ export type StartRecordingOptions = {
   /** Program audio from the mixer; null records video only. */
   audioStream: MediaStream | null
   frameRate: number
+  sink: ChunkSink
+  /** Timeslice between chunks. Default one second. */
+  timesliceMs?: number
 }
+
+const DEFAULT_TIMESLICE_MS = 1000
 
 export class RecordingEngine {
   private recorder: MediaRecorder | null = null
-  private chunks: Blob[] = []
   private captureStream: MediaStream | null = null
   private status: RecordingStatus = 'idle'
   private format: RecordingFormat | null = null
+  private sink: ChunkSink | null = null
+
+  private chunkIndex = 0
+  private bytes = 0
+  /** Chained so chunks reach the sink in order even when writes overlap. */
+  private writeQueue: Promise<void> = Promise.resolve()
+  private sinkFailed = false
 
   private startedAt = 0
   private accumulatedMs = 0
-  private pausedAt = 0
   private tickTimer: ReturnType<typeof setInterval> | null = null
 
   private dimensions = { width: 0, height: 0 }
@@ -77,6 +98,11 @@ export class RecordingEngine {
 
   getFormat(): RecordingFormat | null {
     return this.format
+  }
+
+  /** The dimensions locked at start; the file keeps them whatever the UI does. */
+  getDimensions(): { width: number; height: number } {
+    return this.dimensions
   }
 
   /** Elapsed recorded time, excluding paused spans. */
@@ -169,7 +195,11 @@ export class RecordingEngine {
     this.captureStream = stream
     this.dimensions = { width: options.canvas.width, height: options.canvas.height }
     this.frameRate = options.frameRate
-    this.chunks = []
+    this.sink = options.sink
+    this.chunkIndex = 0
+    this.bytes = 0
+    this.sinkFailed = false
+    this.writeQueue = Promise.resolve()
 
     const recorderOptions: MediaRecorderOptions = {
       mimeType: format.mimeType,
@@ -204,10 +234,7 @@ export class RecordingEngine {
     this.attachRecorderListeners(this.recorder)
 
     try {
-      // A timeslice makes the browser flush chunks as it goes. Without it, a
-      // crash mid-recording loses everything, and memory grows unbounded in
-      // one opaque buffer.
-      this.recorder.start(1000)
+      this.recorder.start(options.timesliceMs ?? DEFAULT_TIMESLICE_MS)
     } catch {
       this.releaseCapture()
       this.fail({
@@ -235,7 +262,6 @@ export class RecordingEngine {
       return
     }
     this.accumulatedMs += performance.now() - this.startedAt
-    this.pausedAt = performance.now()
     this.stopTicking()
     this.setStatus('paused')
   }
@@ -247,7 +273,6 @@ export class RecordingEngine {
     } catch {
       return
     }
-    void this.pausedAt
     this.startedAt = performance.now()
     this.startTicking()
     this.setStatus('recording')
@@ -255,8 +280,7 @@ export class RecordingEngine {
 
   /**
    * Stop and finalize. The result arrives through `onComplete` once the
-   * recorder's `stop` event fires — this method does not resolve with the blob,
-   * because the blob does not exist yet when `stop()` returns.
+   * recorder's `stop` event fires and the last chunk has been written.
    */
   stop(): void {
     if (this.status !== 'recording' && this.status !== 'paused') return
@@ -293,14 +317,15 @@ export class RecordingEngine {
         // Nothing more to do; we are discarding the data regardless.
       }
     }
-    this.chunks = []
+    this.sink = null
     this.releaseCapture()
     this.setStatus('idle')
   }
 
   private attachRecorderListeners(recorder: MediaRecorder): void {
     recorder.ondataavailable = (event: BlobEvent) => {
-      if (event.data && event.data.size > 0) this.chunks.push(event.data)
+      if (!event.data || event.data.size === 0) return
+      this.enqueueChunk(event.data)
     }
 
     recorder.onerror = () => {
@@ -308,7 +333,8 @@ export class RecordingEngine {
       this.releaseCapture()
       this.fail({
         code: 'recorder-error',
-        message: 'The recorder stopped unexpectedly. Any data captured so far was kept.',
+        message:
+          'The recorder stopped unexpectedly. Everything captured so far is stored and can be recovered.',
         recoverable: true,
         at: Date.now(),
       })
@@ -319,32 +345,70 @@ export class RecordingEngine {
       // are permitted to substitute, and the file extension must follow the
       // real contents.
       const effectiveMime = recorder.mimeType || this.format?.mimeType || 'video/webm'
-      const blob = new Blob(this.chunks, { type: effectiveMime })
-      this.chunks = []
       this.releaseCapture()
       this.recorder = null
 
-      if (blob.size === 0) {
+      // Wait for the last chunk to land before claiming completion.
+      void this.writeQueue.then(() => {
+        if (this.sinkFailed) return
+        if (this.chunkIndex === 0) {
+          this.fail({
+            code: 'finalize-failed',
+            message: 'The recording finished with no data. Nothing was saved.',
+            recoverable: true,
+            at: Date.now(),
+          })
+          return
+        }
+        this.setStatus('complete')
+        this.events.onComplete?.({
+          mimeType: effectiveMime,
+          extension: extensionForMimeType(effectiveMime),
+          durationMs: Math.round(this.accumulatedMs),
+          width: this.dimensions.width,
+          height: this.dimensions.height,
+          frameRate: this.frameRate,
+          chunkCount: this.chunkIndex,
+          bytes: this.bytes,
+        })
+      })
+    }
+  }
+
+  private enqueueChunk(chunk: Blob): void {
+    const sink = this.sink
+    if (!sink || this.sinkFailed) return
+    const index = this.chunkIndex
+    this.chunkIndex += 1
+    this.bytes += chunk.size
+    const at = Date.now()
+    this.writeQueue = this.writeQueue
+      .then(() => sink(index, chunk, at))
+      .catch((error: unknown) => {
+        if (this.sinkFailed) return
+        this.sinkFailed = true
+        const message = error instanceof Error ? error.message : String(error)
+        // Stop the recorder: there is nowhere to put the next chunk.
+        this.stopTicking()
+        const recorder = this.recorder
+        this.recorder = null
+        if (recorder && recorder.state !== 'inactive') {
+          recorder.ondataavailable = null
+          recorder.onstop = null
+          try {
+            recorder.stop()
+          } catch {
+            // Already stopping.
+          }
+        }
+        this.releaseCapture()
         this.fail({
-          code: 'finalize-failed',
-          message: 'The recording finished with no data. Nothing was saved.',
+          code: /quota/i.test(message) ? 'quota-exceeded' : 'persist-failed',
+          message: `${message} The recording stopped; the ${index} chunk${index === 1 ? '' : 's'} already stored can be recovered.`,
           recoverable: true,
           at: Date.now(),
         })
-        return
-      }
-
-      this.setStatus('complete')
-      this.events.onComplete?.({
-        blob,
-        mimeType: effectiveMime,
-        extension: extensionForMimeType(effectiveMime),
-        durationMs: Math.round(this.accumulatedMs),
-        width: this.dimensions.width,
-        height: this.dimensions.height,
-        frameRate: this.frameRate,
       })
-    }
   }
 
   /**

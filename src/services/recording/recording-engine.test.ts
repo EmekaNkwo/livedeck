@@ -105,11 +105,27 @@ afterEach(() => {
   resetCapabilitiesCache()
 })
 
-const startOptions = () => ({
-  canvas,
-  audioStream: createFakeStream(['audio']),
-  frameRate: 30,
-})
+/** Chunks the engine handed to the sink, in order. */
+let sunk: Array<{ index: number; size: number }> = []
+/** Set by a test to make the sink reject. */
+let sinkRejects: Error | null = null
+
+const startOptions = () => {
+  sunk = []
+  sinkRejects = null
+  return {
+    canvas,
+    audioStream: createFakeStream(['audio']),
+    frameRate: 30,
+    sink: async (index: number, chunk: Blob) => {
+      if (sinkRejects) throw sinkRejects
+      sunk.push({ index, size: chunk.size })
+    },
+  }
+}
+
+/** Let the write queue and the completion callback settle. */
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 describe('start', () => {
   it('reaches the recording state and reports the negotiated format', async () => {
@@ -127,7 +143,7 @@ describe('start', () => {
     const audioStream = createFakeStream(['audio'])
     const captureSpy = vi.spyOn(canvas, 'captureStream')
 
-    await engine.start({ canvas, audioStream, frameRate: 24 })
+    await engine.start({ canvas, audioStream, frameRate: 24, sink: async () => {} })
 
     // Capturing at the target rate ties the encoder to the compositor cadence.
     expect(captureSpy).toHaveBeenCalledWith(24)
@@ -136,7 +152,7 @@ describe('start', () => {
 
   it('records video only when no audio mix is available', async () => {
     installRecorder({ withPause: true })
-    const ok = await engine.start({ canvas, audioStream: null, frameRate: 30 })
+    const ok = await engine.start({ canvas, audioStream: null, frameRate: 30, sink: async () => {} })
     expect(ok).toBe(true)
     expect(engine.getStatus()).toBe('recording')
   })
@@ -211,14 +227,18 @@ describe('stop and finalize', () => {
     recorder.ondataavailable?.({ data: new Blob(['chunk'], { type: 'video/webm' }) })
 
     engine.stop()
+    await flush()
 
     // 'finalizing' must appear before 'complete' — success is never reported
     // ahead of the browser actually producing data.
     expect(statuses).toEqual(['starting', 'recording', 'finalizing', 'complete'])
     expect(onComplete).toHaveBeenCalledTimes(1)
-    const result = onComplete.mock.calls[0]![0] as { blob: Blob; extension: string }
-    expect(result.blob.size).toBeGreaterThan(0)
+    const result = onComplete.mock.calls[0]![0] as { chunkCount: number; bytes: number; extension: string }
+    expect(result.chunkCount).toBe(1)
+    expect(result.bytes).toBeGreaterThan(0)
     expect(result.extension).toBe('webm')
+    // The chunk went to the sink, not into the engine.
+    expect(sunk).toEqual([{ index: 0, size: 5 }])
   })
 
   it('reports a failure when the recorder produced no data', async () => {
@@ -229,6 +249,7 @@ describe('stop and finalize', () => {
 
     await engine.start(startOptions())
     engine.stop()
+    await flush()
 
     expect(onComplete).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledWith(
@@ -247,6 +268,7 @@ describe('stop and finalize', () => {
     recorder.mimeType = 'video/mp4'
     recorder.ondataavailable?.({ data: new Blob(['x']) })
     engine.stop()
+    await flush()
 
     const result = onComplete.mock.calls[0]![0] as { extension: string; mimeType: string }
     expect(result.mimeType).toBe('video/mp4')
@@ -266,6 +288,43 @@ describe('stop and finalize', () => {
     // These tracks belong to the recorder alone, so releasing them is correct
     // and is what lets the browser free the encoder.
     expect(captured.getVideoTracks()[0]?.readyState).toBe('ended')
+  })
+
+  it('writes chunks to the sink in order and never keeps them', async () => {
+    installRecorder({ withPause: true })
+    const onComplete = vi.fn()
+    engine.setEvents({ onComplete })
+    await engine.start(startOptions())
+    const recorder = instances[0]!
+    recorder.ondataavailable?.({ data: new Blob(['aa']) })
+    recorder.ondataavailable?.({ data: new Blob(['bbb']) })
+    recorder.ondataavailable?.({ data: new Blob([]) })
+    engine.stop()
+    await flush()
+    expect(sunk).toEqual([
+      { index: 0, size: 2 },
+      { index: 1, size: 3 },
+    ])
+    expect(onComplete.mock.calls[0]![0]).toMatchObject({ chunkCount: 2, bytes: 5 })
+  })
+
+  it('stops with a persist error when the sink fails, keeping what was stored', async () => {
+    installRecorder({ withPause: true })
+    const onError = vi.fn()
+    const onComplete = vi.fn()
+    engine.setEvents({ onError, onComplete })
+    const options = startOptions()
+    await engine.start(options)
+    const recorder = instances[0]!
+    recorder.ondataavailable?.({ data: new Blob(['ok']) })
+    await flush()
+    sinkRejects = Object.assign(new Error('QuotaExceededError: storage is full'), { name: 'QuotaExceededError' })
+    recorder.ondataavailable?.({ data: new Blob(['no room']) })
+    await flush()
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'quota-exceeded', recoverable: true }))
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(engine.getStatus()).toBe('error')
+    expect(recorder.state).toBe('inactive')
   })
 
   it('ignores stop() when not recording', () => {

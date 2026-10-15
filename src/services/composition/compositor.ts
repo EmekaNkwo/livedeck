@@ -55,6 +55,7 @@ export class CanvasCompositor {
   private getSnapshot: SnapshotSource = () => EMPTY_SNAPSHOT
   private rafId = 0
   private running = false
+  private sizeLocked = false
 
   private targetFps = 30
   private lastPaintAt = 0
@@ -114,11 +115,29 @@ export class CanvasCompositor {
   resize(size: Size): void {
     const canvas = this.canvas
     if (!canvas) return
+    if (this.sizeLocked) return
     if (canvas.width === size.width && canvas.height === size.height) return
     canvas.width = size.width
     canvas.height = size.height
     // Changing the backing store clears it, so force a repaint.
     this.lastRevision = -1
+  }
+
+  /**
+   * While locked, the backing store keeps its size whatever the snapshot says.
+   *
+   * The recorder captures the canvas, and a capture's encoded dimensions are
+   * whatever the canvas is at the time of each frame. A settings change or a
+   * window-driven resize mid-recording would change the file's resolution
+   * part way through, which editors reject. Locked at record start, released
+   * at stop.
+   */
+  lockSize(locked: boolean): void {
+    this.sizeLocked = locked
+  }
+
+  isSizeLocked(): boolean {
+    return this.sizeLocked
   }
 
   start(): void {
@@ -183,7 +202,7 @@ export class CanvasCompositor {
     const ctx = this.ctx
     if (!canvas || !ctx) return
 
-    this.resize(snapshot.canvas)
+    if (!this.sizeLocked) this.resize(snapshot.canvas)
     const started = performance.now()
 
     const transition = snapshot.transition
