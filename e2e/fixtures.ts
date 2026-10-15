@@ -16,7 +16,7 @@ import { type BrowserContext, type Page, expect } from '@playwright/test'
  * the first render. The shape is zustand's persist envelope at the store's
  * current version so no migration rewrites it.
  */
-export async function useMediaServer(target: Page | BrowserContext): Promise<void> {
+export async function pointAtMediaServer(target: Page | BrowserContext): Promise<void> {
   await target.addInitScript(
     ([key, url]) => {
       window.localStorage.setItem(

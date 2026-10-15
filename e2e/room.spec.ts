@@ -5,7 +5,7 @@ import {
   openTab,
   sourceRows,
   startCamera,
-  useMediaServer,
+  pointAtMediaServer,
 } from './fixtures'
 
 /**
@@ -25,7 +25,7 @@ import {
 
 test.describe('Scenario E: room-based joining', () => {
   test.beforeEach(async ({ page }) => {
-    await useMediaServer(page)
+    await pointAtMediaServer(page)
   })
 
   test('the invite is a single reusable room link, with no guest fields', async ({ page }) => {
@@ -64,8 +64,8 @@ test.describe('Scenario E: room-based joining', () => {
   }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useMediaServer(hostContext)
-    await useMediaServer(guestContext)
+    await pointAtMediaServer(hostContext)
+    await pointAtMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -121,8 +121,8 @@ test.describe('Scenario E: room-based joining', () => {
   test('a guest opening the room link joins and connects', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useMediaServer(hostContext)
-    await useMediaServer(guestContext)
+    await pointAtMediaServer(hostContext)
+    await pointAtMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 

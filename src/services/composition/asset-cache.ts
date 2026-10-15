@@ -10,7 +10,6 @@
  */
 
 import type { AssetRef } from '@/types/source'
-import { getAsset } from '@/services/persistence/asset-store'
 
 export type AssetKind = 'image' | 'video'
 
@@ -90,7 +89,8 @@ class AssetCache {
     // An asset id resolves asynchronously; the entry reports `loading` until
     // the blob is read and an object URL exists for it.
     const assetId = ref.assetId as string
-    void getAsset(assetId)
+    void import('@/services/persistence/asset-store')
+      .then(({ getAsset }) => getAsset(assetId))
       .then((asset) => {
         if (this.entries.get(sourceId) !== entry) return
         if (!asset) {

@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Page } from '@playwright/test'
-import { RELAY_PORT, guestTiles, openDirector, openTab, useMediaServer } from './fixtures'
+import { RELAY_PORT, guestTiles, openDirector, openTab, pointAtMediaServer } from './fixtures'
 
 /**
  * Scenario L — a twelve-person studio.
@@ -32,7 +32,7 @@ test.describe('Scenario L: twelve participants', () => {
 
   test('twelve guests, one screen share, a director recording', async ({ browser, page }) => {
     const room = `load-${Date.now().toString(36)}`
-    await useMediaServer(page)
+    await pointAtMediaServer(page)
     await openDirector(page, room)
     await openTab(page, /Guests/)
     await expect(page.getByRole('region', { name: 'Guests' }).getByText(/In the room as director/i)).toBeVisible({
@@ -187,7 +187,7 @@ test.describe('Scenario L: twelve participants', () => {
 
 async function joinGuest(browser: Browser, room: string, name: string): Promise<Page> {
   const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
-  await useMediaServer(context)
+  await pointAtMediaServer(context)
   const page = await context.newPage()
   await page.goto(`/push/${room}`)
   await page.getByLabel('Your name').fill(name)

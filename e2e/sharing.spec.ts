@@ -6,7 +6,7 @@ import {
   openTab,
   sourceRows,
   startCamera,
-  useMediaServer,
+  pointAtMediaServer,
   startLobbyMedia,
 } from './fixtures'
 
@@ -20,7 +20,7 @@ import {
 
 test.describe('Scenario G: devices, speaking, and solo links', () => {
   test.beforeEach(async ({ page }) => {
-    await useMediaServer(page)
+    await pointAtMediaServer(page)
   })
 
   test('the guest lobby offers a device picker beside each toggle', async ({ page }) => {
@@ -58,8 +58,8 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
   test('in a call there is no meter, and speech shows on the person', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useMediaServer(hostContext)
-    await useMediaServer(guestContext)
+    await pointAtMediaServer(hostContext)
+    await pointAtMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 
@@ -117,7 +117,7 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
     const context = await browser.newContext({
       permissions: ['camera', 'microphone', 'clipboard-read', 'clipboard-write'],
     })
-    await useMediaServer(context)
+    await pointAtMediaServer(context)
     const director = await context.newPage()
 
     try {
@@ -168,8 +168,8 @@ test.describe('Scenario G: devices, speaking, and solo links', () => {
       permissions: ['camera', 'microphone', 'clipboard-read', 'clipboard-write'],
     })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useMediaServer(hostContext)
-    await useMediaServer(guestContext)
+    await pointAtMediaServer(hostContext)
+    await pointAtMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 

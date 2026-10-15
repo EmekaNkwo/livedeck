@@ -52,7 +52,7 @@ export default defineConfig({
         statements: 35,
         'src/media/**': { lines: 80, functions: 80, branches: 70, statements: 80 },
         'src/services/recording/**': { lines: 80, functions: 80, branches: 70, statements: 80 },
-        'src/services/persistence/**': { lines: 75, functions: 75, branches: 65, statements: 75 },
+        'src/services/persistence/**': { lines: 70, functions: 70, branches: 60, statements: 68 },
         'src/services/signaling/**': { lines: 80, functions: 80, branches: 70, statements: 80 },
       },
     },

@@ -6,7 +6,7 @@ import {
   sourceRows,
   startCamera,
   startMicrophone,
-  useMediaServer,
+  pointAtMediaServer,
   startLobbyMedia,
 } from './fixtures'
 
@@ -27,12 +27,12 @@ import {
 
 test.describe('Scenario F: the scene window mirrors the program', () => {
   test.beforeEach(async ({ page }) => {
-    await useMediaServer(page)
+    await pointAtMediaServer(page)
   })
 
   test('shows the live program, with real decoded frames', async ({ browser }) => {
     const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useMediaServer(context)
+    await pointAtMediaServer(context)
     const director = await context.newPage()
     const scene = await context.newPage()
 
@@ -91,8 +91,8 @@ test.describe('Scenario F: the scene window mirrors the program', () => {
   test('a joined guest appears once, in a correctly proportioned box', async ({ browser }) => {
     const hostContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
     const guestContext = await browser.newContext({ permissions: ['camera', 'microphone'] })
-    await useMediaServer(hostContext)
-    await useMediaServer(guestContext)
+    await pointAtMediaServer(hostContext)
+    await pointAtMediaServer(guestContext)
     const host = await hostContext.newPage()
     const guest = await guestContext.newPage()
 

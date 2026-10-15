@@ -3,7 +3,6 @@ import type { Scene } from '@/types/scene'
 import type { MediaSource } from '@/types/source'
 import type { AudioChannelConfig } from '@/types/audio'
 import type { StudioSession } from '@/types/session'
-import { dataUrlToBlob, putAsset } from './asset-store'
 import { reportPersistenceIssue } from './issues'
 import { readJson, removeKey, writeJson } from './local-store'
 import { StudioDocumentSchema, StudioSessionSchema, validate } from './schemas'
@@ -132,6 +131,15 @@ export function loadDocument(sessionId: string): StudioDocument | null {
  */
 export async function migrateLegacyAssets(sources: MediaSource[]): Promise<MediaSource[]> {
   const migrated: MediaSource[] = []
+  const legacy = sources.filter(
+    (source) =>
+      (source.settings.kind === 'image' || source.settings.kind === 'video') &&
+      !source.settings.assetId &&
+      Boolean(source.settings.dataUrl),
+  )
+  if (legacy.length === 0) return migrated
+  // Loaded on demand: IndexedDB tooling has no business in the landing page.
+  const { dataUrlToBlob, putAsset } = await import('./asset-store')
   for (const source of sources) {
     const settings = source.settings
     if ((settings.kind !== 'image' && settings.kind !== 'video') || settings.assetId || !settings.dataUrl) continue

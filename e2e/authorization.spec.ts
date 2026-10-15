@@ -7,7 +7,7 @@ import {
   selfParticipantId,
   sessionControl,
   trackSockets,
-  useMediaServer,
+  pointAtMediaServer,
 } from './fixtures'
 
 /**
@@ -26,7 +26,7 @@ import {
 
 async function joinAsGuest(browser: Browser, room: string, name: string): Promise<Page> {
   const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
-  await useMediaServer(context)
+  await pointAtMediaServer(context)
   await trackSockets(context)
   const page = await context.newPage()
   await page.goto(`/push/${room}`)
@@ -39,7 +39,7 @@ async function joinAsGuest(browser: Browser, room: string, name: string): Promis
 
 test.describe('Scenario I: authorization and recovery', () => {
   test.beforeEach(async ({ page }) => {
-    await useMediaServer(page)
+    await pointAtMediaServer(page)
   })
 
   test('a guest cannot control another guest; the director can', async ({ browser, page }) => {
