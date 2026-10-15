@@ -214,18 +214,21 @@ export class ProgramLinkPublisher {
       this.peers.delete(subscriberId)
     }
 
-    this.syncSenders(pc, target)
     /*
-     * Declare send-only m-lines even with nothing to send yet.
+     * Always exactly two send-only m-lines, video then audio, declared before
+     * any track is known.
      *
-     * This is what lets a solo window open *before* its source is live: the
-     * connection completes now, and `refresh` attaches the track later with
-     * `replaceTrack` instead of needing a second negotiation round.
+     * Tracks are then only ever swapped in with `replaceTrack`, never added:
+     * a solo window can open before its source is live, an audio-only source
+     * cannot take the video slot, and a track that appears later needs no
+     * second negotiation (which this link never performs). Both transceivers
+     * name the same stream, so the subscriber receives one stream holding
+     * both tracks.
      */
-    if (pc.getTransceivers().length === 0) {
-      pc.addTransceiver('video', { direction: 'sendonly' })
-      pc.addTransceiver('audio', { direction: 'sendonly' })
-    }
+    const linkStream = new MediaStream()
+    pc.addTransceiver('video', { direction: 'sendonly', streams: [linkStream] })
+    pc.addTransceiver('audio', { direction: 'sendonly', streams: [linkStream] })
+    this.syncSenders(pc, target)
 
     try {
       const offer = await pc.createOffer()
@@ -240,36 +243,22 @@ export class ProgramLinkPublisher {
   private syncSenders(pc: RTCPeerConnection, target: ProgramTarget): void {
     const stream = this.resolve(target)
     /*
-     * Transceivers are indexed by position, matched to the order they were
-     * declared in (video, then audio).
-     *
-     * Keying off `sender.track?.kind` could never fill an *empty* sender,
-     * because a null track has no kind to compare against — and an empty
-     * sender is exactly the state a solo window starts in when its source is
-     * not live yet.
+     * Transceivers are matched by position: `offerTo` declares video at 0 and
+     * audio at 1 on every connection. Keying off `sender.track?.kind` could
+     * never fill an *empty* sender, because a null track has no kind, and an
+     * empty sender is exactly the state a solo window starts in.
      */
     const transceivers = pc.getTransceivers()
     const kinds = ['video', 'audio'] as const
-
-    for (let index = 0; index < kinds.length; index += 1) {
-      const kind = kinds[index]!
+    kinds.forEach((kind, index) => {
+      const sender = transceivers[index]?.sender
+      if (!sender) return
       const track = stream?.getTracks().find((entry) => entry.kind === kind) ?? null
-      const transceiver = transceivers[index] ?? null
-
-      if (transceiver) {
-        if (transceiver.sender.track !== track) {
-          void transceiver.sender.replaceTrack(track).catch(() => {})
-        }
-        continue
-      }
-      if (track && stream) {
-        try {
-          pc.addTrack(track, stream)
-        } catch {
-          // The connection closed underneath us.
-        }
-      }
-    }
+      if (sender.track === track) return
+      // A rejection means the connection closed underneath us; the peer is
+      // then dropped by its connection-state handler.
+      void sender.replaceTrack(track).catch(() => undefined)
+    })
   }
 
   private closePeer(pc: RTCPeerConnection): void {
