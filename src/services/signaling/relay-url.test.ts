@@ -16,8 +16,16 @@ describe('resolveRelayUrl', () => {
     expect(resolveRelayUrl('')).toBe(defaultRelayUrl())
   })
 
-  it('assumes the dev server port when the page has a port', () => {
+  it('assumes the relay beside the dev server in a development build', () => {
+    vi.stubEnv('DEV', true)
     // jsdom serves tests from http://localhost:3000.
     expect(defaultRelayUrl()).toBe(`ws://localhost:${DEV_RELAY_PORT}`)
+  })
+
+  it('uses the page’s own origin, port included, in a production build', () => {
+    // A deployment behind a proxy on a non-standard port must not be sent
+    // to the development relay port.
+    vi.stubEnv('DEV', false)
+    expect(defaultRelayUrl()).toBe('ws://localhost:3000')
   })
 })

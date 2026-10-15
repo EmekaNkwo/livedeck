@@ -9,11 +9,11 @@
  * Resolution order:
  *
  *  1. `VITE_SIGNALING_URL`, for a deployed studio whose relay is elsewhere.
- *  2. During development (the page URL carries an explicit port, e.g. Vite on
- *     5173) the relay is assumed to be beside it on {@link DEV_RELAY_PORT},
- *     which is where `server/` listens by default.
- *  3. Otherwise the page's own origin, on the assumption that a studio served
- *     without a port sits behind a proxy that also fronts `/signal`.
+ *  2. A development build (Vite's dev server) assumes the relay is beside it
+ *     on {@link DEV_RELAY_PORT}, which is where `server/` listens by default.
+ *  3. A production build uses the page's own origin, port included: a
+ *     deployed studio sits behind a proxy that also fronts `/signal`, and
+ *     that proxy may listen on any port.
  *
  * None of this is a promise that the relay is *up*. The transport reports its
  * own state, and the Guests panel says so plainly when it cannot connect.
@@ -27,13 +27,16 @@ export function defaultRelayUrl(): string {
   if (typeof configured === 'string' && configured.trim()) return configured.trim()
 
   if (typeof window === 'undefined') return ''
-  const { protocol, hostname, port } = window.location
+  const { protocol, hostname, host } = window.location
   const scheme = protocol === 'https:' ? 'wss:' : 'ws:'
 
-  // A port in the page URL means a dev server, which is not the relay — the
-  // relay is a second process beside it. No port means a proxied deployment,
-  // where the same origin is the best guess available.
-  return port ? `${scheme}//${hostname}:${DEV_RELAY_PORT}` : `${scheme}//${hostname}`
+  // The dev server is not the relay; the relay is a second process beside
+  // it. A built studio is served by the proxy that also carries `/signal`.
+  return isDevBuild() ? `${scheme}//${hostname}:${DEV_RELAY_PORT}` : `${scheme}//${host}`
+}
+
+function isDevBuild(): boolean {
+  return import.meta.env.DEV === true
 }
 
 /** The address to actually dial: whatever is configured, else the default. */
