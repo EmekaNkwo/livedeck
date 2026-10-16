@@ -33,7 +33,11 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/server
 COPY server/package.json server/package-lock.json ./
-RUN npm ci
+# Installed ONCE for the whole build. mediasoup normally downloads a prebuilt
+# worker; when it cannot, it compiles one with a C++ job per CPU core, which
+# on a many-core build host runs out of memory. Pinning the install to two
+# cores bounds that compile (mediasoup sizes its jobs from the CPU affinity).
+RUN if [ "$(nproc)" -gt 2 ]; then taskset -c 0-1 npm ci; else npm ci; fi
 
 # ----------------------------------------------------------------------- build
 FROM node:${NODE_VERSION} AS build
@@ -49,13 +53,10 @@ WORKDIR /app/server
 RUN npm run build
 
 # ---------------------------------------------------------- runtime dependencies
-FROM node:${NODE_VERSION} AS prod-deps
-RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip make g++ ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /app/server
-COPY server/package.json server/package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# The same install with dev dependencies pruned, so mediasoup's worker is
+# never fetched or compiled a second time.
+FROM deps AS prod-deps
+RUN npm prune --omit=dev && npm cache clean --force
 
 # --------------------------------------------------------------------- runtime
 FROM node:${NODE_VERSION} AS runtime
