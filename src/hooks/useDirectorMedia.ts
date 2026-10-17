@@ -20,7 +20,7 @@ import { useMediaSession, type UseMediaSession } from './useMediaSession'
  *
  * ROOM KEYS
  * ---------
- * The first control room to open an empty room claims it and is handed the
+ * The first control room to open a room claims it and is handed the
  * director key, which is stored per room so a reload keeps the role. A link
  * carrying `?key=` wins over the stored one, so a director can be moved to
  * another machine by sharing its link.

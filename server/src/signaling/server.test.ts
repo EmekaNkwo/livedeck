@@ -197,6 +197,16 @@ describe('joining', () => {
     await second.expectError('getRoomKeys', {}, 'forbidden')
   })
 
+  it('lets the studio claim a room that guests opened first', async () => {
+    const guest = await connect()
+    expect((await guest.request('join', { room: 'early', label: 'Guest' })).role).toBe('guest')
+    const studio = await connect()
+    const claimed = await studio.request('join', { room: 'early', label: 'Studio', claim: true })
+    expect(claimed.role).toBe('director')
+    const late = await connect()
+    expect((await late.request('join', { room: 'early', label: 'Impostor', claim: true })).role).toBe('guest')
+  })
+
   it('gives the director the keys', async () => {
     const { client } = await joinAs('Dir', keys.keysFor('studio').directorKey)
     await expect(client.request('getRoomKeys', {})).resolves.toEqual(keys.keysFor('studio'))

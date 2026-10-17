@@ -11,7 +11,7 @@ import { DirectorRoom } from '@/components/layout/DirectorRoom'
  * `/director/:room` — the control room route.
  *
  * Resolves the room, creating it if it does not exist, then joins it on the
- * media server. The first control room into an empty room claims it as its
+ * media server. The first control room to open a room claims it as its
  * director; a `?key=` in the URL grants the role explicitly.
  */
 export function DirectorPage() {

@@ -51,6 +51,11 @@ export class Room {
   private readonly maxPeers: number
   private readonly log: RoomOptions['log']
   private closed = false
+  /**
+   * Whether a studio has claimed this room. Set once, for the room's life:
+   * the room is reaped when its last participant leaves, which resets it.
+   */
+  private claimedByStudio = false
 
   constructor(options: RoomOptions) {
     this.name = options.name
@@ -77,6 +82,18 @@ export class Room {
 
   get isClosed(): boolean {
     return this.closed
+  }
+
+  /**
+   * Hand the director role to the first studio that asks. True once only.
+   *
+   * Guests who open the link first do not block it: what matters is that
+   * nobody has claimed the room yet, not that it is empty.
+   */
+  claim(): boolean {
+    if (this.claimedByStudio) return false
+    this.claimedByStudio = true
+    return true
   }
 
   get isEmpty(): boolean {
