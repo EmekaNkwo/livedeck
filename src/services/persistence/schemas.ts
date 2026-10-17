@@ -164,7 +164,6 @@ export const StudioSettingsSchema = z
     reducedMotion: z.enum(['system', 'always', 'never']),
     previewFrameRate: z.union([z.literal(24), z.literal(30), z.literal(60)]),
     monitorProgramAudio: z.boolean(),
-    iceServerUrls: z.array(z.string().max(512)),
     signalingServerUrl: z.string().max(512),
   })
   .partial()

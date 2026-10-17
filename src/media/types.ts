@@ -1,6 +1,5 @@
 import type {
   ControlAction,
-  IceServer,
   MediaSource,
   Participant,
   Role,
@@ -33,6 +32,7 @@ export type SessionStatus =
   | 'failed'
   | 'closed'
 
+/** The media conference's state; both directions share one connection. */
 export type TransportHealth = 'new' | 'connecting' | 'connected' | 'disconnected' | 'failed' | 'closed'
 
 export type RemoteTrack = {
@@ -61,14 +61,13 @@ export type SessionSnapshot = {
   role: Role | null
   room: string | null
   participants: Participant[]
-  /** Remote tracks, keyed by consumer id. */
+  /** Remote tracks the studio may use, keyed by `consumerId`. */
   tracks: RemoteTrack[]
   producers: LocalProducerInfo[]
   sendTransport: TransportHealth
   recvTransport: TransportHealth
   /** A human-readable reason when `status` is `failed`. */
   error: string | null
-  iceServers: IceServer[]
   /** Why the server closed the session, when it did. */
   closedBecause: string | null
 }
@@ -110,6 +109,5 @@ export const INITIAL_SNAPSHOT: SessionSnapshot = {
   sendTransport: 'new',
   recvTransport: 'new',
   error: null,
-  iceServers: [],
   closedBecause: null,
 }

@@ -1,34 +1,14 @@
-import type { types } from 'mediasoup'
-import type {
-  MediaSource,
-  NotificationData,
-  NotificationEvent,
-  Participant,
-  ProducerInfo,
-  Role,
-} from '../../../shared/protocol'
+import type { NotificationData, NotificationEvent, Participant, Role } from '../../../shared/protocol'
 
 /**
- * One participant's server-side media state.
+ * One participant, as the server knows them.
  *
- * Owns the transports, producers and consumers mediasoup created for it, and
- * the one function that reaches its browser. Everything about identity is
- * decided here by the server at join time and never changed by the client.
+ * Identity is decided here by the server at join time and never changed by
+ * the client. Media lives in Jitsi; this is the half that decides who the
+ * participant is, what they may do, and how to reach their browser.
  */
 
 export type PeerSend = <E extends NotificationEvent>(event: E, data: NotificationData<E>) => void
-
-export type ProducerEntry = {
-  producer: types.Producer
-  source: MediaSource
-}
-
-export type ConsumerEntry = {
-  consumer: types.Consumer
-  producerId: string
-  producerPeerId: string
-  source: MediaSource
-}
 
 export class Peer {
   readonly id: string
@@ -42,23 +22,12 @@ export class Peer {
   /** Changes on resume so the previous socket cannot keep acting. */
   resumeToken: string
 
-  readonly transports = new Map<string, types.WebRtcTransport>()
-  readonly producers = new Map<string, ProducerEntry>()
-  readonly consumers = new Map<string, ConsumerEntry>()
-
   /** Null while the socket is gone and the resume grace period is running. */
   private sender: PeerSend | null
   private graceTimer: NodeJS.Timeout | null = null
   private closed = false
 
-  constructor(options: {
-    id: string
-    role: Role
-    label: string
-    resumeToken: string
-    send: PeerSend
-    now?: number
-  }) {
+  constructor(options: { id: string; role: Role; label: string; resumeToken: string; send: PeerSend; now?: number }) {
     this.id = options.id
     this.role = options.role
     this.label = options.label
@@ -84,7 +53,7 @@ export class Peer {
     this.sender?.(event, data)
   }
 
-  /** Socket dropped: keep media alive and wait for a resume. */
+  /** Socket dropped: keep the participant and wait for a resume. */
   detach(onExpire: () => void, graceMs: number): void {
     this.sender = null
     if (this.graceTimer) clearTimeout(this.graceTimer)
@@ -113,27 +82,12 @@ export class Peer {
     }
   }
 
-  producerInfos(): ProducerInfo[] {
-    return [...this.producers.values()].map(({ producer, source }) => ({
-      id: producer.id,
-      participantId: this.id,
-      kind: producer.kind,
-      source,
-      paused: producer.paused,
-    }))
-  }
-
-  /** Release every mediasoup object. Idempotent. */
+  /** Idempotent. */
   close(): void {
     if (this.closed) return
     this.closed = true
     if (this.graceTimer) clearTimeout(this.graceTimer)
     this.graceTimer = null
     this.sender = null
-    // Closing a transport closes its producers and consumers.
-    for (const transport of this.transports.values()) transport.close()
-    this.transports.clear()
-    this.producers.clear()
-    this.consumers.clear()
   }
 }

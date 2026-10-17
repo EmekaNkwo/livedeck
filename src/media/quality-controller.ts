@@ -5,9 +5,9 @@ import type { PeerStats } from '@/types/peer'
 /**
  * Drives {@link MediaSession} from the quality decisions.
  *
- * Downlink: the tier chooses the simulcast layer requested from the SFU for
- * every remote video. Uplink: the tier caps how many layers the camera
- * sends. Both are only ever changed on a tier transition, never per sample.
+ * Downlink: the tier chooses the largest video height requested from the
+ * bridge for every remote video. Uplink: the tier caps the height of the
+ * camera this participant sends. Both are only ever changed on a tier transition, never per sample.
  */
 
 export type QualityReport = {

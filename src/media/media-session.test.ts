@@ -1,8 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Participant, ProducerInfo } from '@shared/protocol'
-import { FakeDevice, FakeSignaling, asDevice, asSignalingClient, fakeTrack } from '@/test/fake-mediasoup'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { Participant } from '@shared/protocol'
+import { FakeLink, FakeSignaling, asSignalingClient, fakeTrack, settle } from '@/test/fake-media'
 import { MediaSession } from './media-session'
 import type { RemoteTrack } from './types'
+
+/**
+ * The session's decisions, with both connections scripted: the LiveDeck
+ * server (roster, roles, grants) and the media link (Jitsi). The real Jitsi
+ * link runs against a real conference in the browser suite.
+ */
 
 const participant = (id: string, role: Participant['role'] = 'guest'): Participant => ({
   id,
@@ -15,56 +21,47 @@ const participant = (id: string, role: Participant['role'] = 'guest'): Participa
   joinedAt: 1,
 })
 
-const producerInfo = (id: string, participantId: string, source: ProducerInfo['source'], kind: ProducerInfo['kind']): ProducerInfo => ({
-  id,
-  participantId,
-  kind,
-  source,
-  paused: false,
-})
-
 let signaling: FakeSignaling
-let device: FakeDevice
 let session: MediaSession
 
 function makeSession(): MediaSession {
-  device = new FakeDevice()
   return new MediaSession({
     url: 'ws://test',
     operationTimeoutMs: 1000,
+    rejoinDelayMs: 0,
     createSignaling: () => asSignalingClient(signaling),
-    createDevice: () => asDevice(device),
+    createLink: () => new FakeLink(),
   })
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
-
 beforeEach(() => {
+  FakeLink.created = []
   signaling = new FakeSignaling()
   session = makeSession()
 })
 
-describe('join sequence', () => {
-  it('connects, joins, loads the device and opens both transports', async () => {
-    signaling.participants = [participant('other')]
-    await session.start({ room: 'studio', label: 'Me' })
-    const snapshot = session.current
-    expect(snapshot.status).toBe('joined')
-    expect(snapshot.self?.id).toBe('self-1')
-    expect(snapshot.participants.map((p) => p.id)).toEqual(['other'])
-    expect(device.loaded).toBe(true)
-    expect(device.transports.map((t) => t.direction)).toEqual(['send', 'recv'])
-    expect(signaling.requests.map((r) => r.method)).toEqual([
-      'join',
-      'createWebRtcTransport',
-      'createWebRtcTransport',
-    ])
-  })
+afterEach(() => {
+  session.leave()
+  vi.unstubAllGlobals()
+})
 
-  it('a viewer gets no send transport', async () => {
-    signaling.role = 'viewer'
-    await session.start({ room: 'studio', label: 'V', role: 'viewer' })
-    expect(device.transports.map((t) => t.direction)).toEqual(['recv'])
+const ids = (tracks: RemoteTrack[]) => tracks.map((track) => track.consumerId).sort()
+
+describe('join sequence', () => {
+  it('joins the room, then the conference with the server’s grant', async () => {
+    await session.start({ room: 'studio', label: 'Me', claim: true })
+    expect(signaling.requests[0]).toMatchObject({ method: 'join', params: { room: 'studio', label: 'Me', claim: true } })
+    const link = FakeLink.latest()
+    expect(link.joins).toHaveLength(1)
+    expect(link.joins[0]?.jwt).toBe('grant-1')
+    expect(session.current).toMatchObject({
+      status: 'joined',
+      role: 'guest',
+      room: 'studio',
+      self: { id: 'self-1', label: 'Me' },
+      sendTransport: 'connected',
+      recvTransport: 'connected',
+    })
   })
 
   it('refuses to start twice', async () => {
@@ -72,169 +69,196 @@ describe('join sequence', () => {
     await expect(session.start({ room: 'studio', label: 'Me' })).rejects.toThrow(/already started/)
   })
 
-  it('fails honestly when the join is refused', async () => {
-    signaling.request = async () => {
-      throw Object.assign(new Error('full'), { code: 'room-full' })
-    }
+  it('fails honestly when the room join is refused', async () => {
+    signaling.failNext = { method: 'join', code: 'room-full' }
+    await expect(session.start({ room: 'studio', label: 'Me' })).rejects.toThrow()
+    expect(session.current.status).toBe('failed')
+    expect(FakeLink.created).toHaveLength(0)
+  })
+
+  it('fails with the conference’s reason when media cannot join', async () => {
     const errors: string[] = []
     session.on('error', (message) => errors.push(message))
-    await expect(session.start({ room: 'studio', label: 'Me' })).rejects.toThrow('full')
-    expect(session.current.status).toBe('failed')
-    expect(session.current.error).toBe('full')
-    expect(errors).toEqual(['full'])
+    const original = FakeLink.prototype.join
+    vi.spyOn(FakeLink.prototype, 'join').mockImplementation(function (this: FakeLink, grant) {
+      this.joinError = 'The media server refused this participant’s token.'
+      return original.call(this, grant)
+    })
+    await expect(session.start({ room: 'studio', label: 'Me' })).rejects.toThrow(/refused/)
+    expect(session.current).toMatchObject({ status: 'failed', error: 'The media server refused this participant’s token.' })
+    expect(errors).toContain('The media server refused this participant’s token.')
   })
 })
 
-describe('producing', () => {
-  it('publishes a track once per source and replaces it in place', async () => {
+describe('sending', () => {
+  it('sends the camera and screen in their own slots and replaces in place', async () => {
     await session.start({ room: 'studio', label: 'Me' })
+    const link = FakeLink.latest()
+    const camera = fakeTrack('video')
+    const screen = fakeTrack('video')
+    await session.produce('camera', camera)
+    await session.produce('screen', screen)
+    expect(link.slots.get('camera')).toBe(camera)
+    expect(link.slots.get('screen')).toBe(screen)
+    const next = fakeTrack('video')
+    await session.produce('camera', next)
+    await session.produce('camera', next)
+    expect(link.slots.get('camera')).toBe(next)
+    expect(link.slotHistory.filter(([slot]) => slot === 'camera')).toHaveLength(2)
+    expect(session.current.producers.map((p) => [p.source, p.paused])).toEqual([
+      ['camera', false],
+      ['screen', false],
+    ])
+  })
+
+  it('sends tracks requested before joining once the conference is up', async () => {
+    const mic = fakeTrack('audio')
+    await session.produce('mic', mic)
+    expect(FakeLink.created).toHaveLength(0)
+    await session.start({ room: 'studio', label: 'Me' })
+    expect(FakeLink.latest().slots.get('audio')).toBe(mic)
+  })
+
+  it('pausing stops sending and resuming sends again; closing clears the slot', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const link = FakeLink.latest()
     const camera = fakeTrack('video')
     await session.produce('camera', camera)
-    const send = device.transports[0]!
-    expect(send.producers).toHaveLength(1)
-    expect(send.producers[0]?.appData.source).toBe('camera')
-    expect(session.current.producers).toEqual([{ producerId: 'p1', source: 'camera', kind: 'video', paused: false }])
-
-    const replacement = fakeTrack('video')
-    await session.produce('camera', replacement)
-    expect(send.producers).toHaveLength(1)
-    expect(send.producers[0]?.track).toBe(replacement)
-    // The same track again is a no-op.
-    await session.produce('camera', replacement)
-    expect(signaling.requests.filter((r) => r.method === 'produce')).toHaveLength(1)
-  })
-
-  it('queues a track requested before joining and publishes it after', async () => {
-    const mic = fakeTrack('audio')
-    const pending = session.produce('mic', mic) // before start: recorded, not sent
-    await pending
-    await session.start({ room: 'studio', label: 'Me' })
-    expect(session.current.producers.map((p) => p.source)).toEqual(['mic'])
-  })
-
-  it('closes a producer and tells the server', async () => {
-    await session.start({ room: 'studio', label: 'Me' })
-    await session.produce('screen', fakeTrack('video'))
-    await session.closeProducer('screen')
-    expect(session.current.producers).toEqual([])
-    expect(signaling.requests.at(-1)).toMatchObject({ method: 'closeProducer', params: { producerId: 'p1' } })
-    // Closing again is harmless.
-    await session.closeProducer('screen')
-  })
-
-  it('pauses and resumes a producer', async () => {
-    await session.start({ room: 'studio', label: 'Me' })
-    await session.produce('mic', fakeTrack('audio'))
-    await session.pauseProducer('mic', true)
-    expect(device.transports[0]?.producers[0]?.paused).toBe(true)
-    expect(signaling.requests.at(-1)?.method).toBe('pauseProducer')
-    await session.pauseProducer('mic', false)
-    expect(signaling.requests.at(-1)?.method).toBe('resumeProducer')
-  })
-})
-
-describe('producer races', () => {
-  it('two concurrent produce calls for one source create one producer with the latest track', async () => {
-    await session.start({ room: 'studio', label: 'Me' })
-    const first = fakeTrack('video')
-    const second = fakeTrack('video')
-    await Promise.all([session.produce('camera', first), session.produce('camera', second)])
-    const send = device.transports[0]!
-    expect(send.producers).toHaveLength(1)
-    expect(send.producers[0]?.track).toBe(second)
-    expect(signaling.requests.filter((r) => r.method === 'produce')).toHaveLength(1)
-  })
-
-  it('closing a source while its producer is being created leaves no producer', async () => {
-    await session.start({ room: 'studio', label: 'Me' })
-    const creating = session.produce('camera', fakeTrack('video'))
+    await session.pauseProducer('camera', true)
+    expect(link.slots.get('camera') ?? null).toBeNull()
+    expect(session.current.producers[0]).toMatchObject({ source: 'camera', paused: true })
+    await session.pauseProducer('camera', true)
+    await session.pauseProducer('camera', false)
+    expect(link.slots.get('camera')).toBe(camera)
     await session.closeProducer('camera')
-    await creating
+    await session.closeProducer('camera')
+    await session.pauseProducer('camera', true)
+    expect(link.slots.get('camera') ?? null).toBeNull()
     expect(session.current.producers).toEqual([])
-    expect(device.transports[0]?.producers.every((p) => p.closed)).toBe(true)
+  })
+
+  it('mixes the microphone with a shared screen’s audio into the one audio slot', async () => {
+    const destinationTrack = fakeTrack('audio', 'mixed')
+    const connect = vi.fn()
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        createMediaStreamDestination() {
+          return { stream: { getAudioTracks: () => [destinationTrack], getTracks: () => [destinationTrack] } }
+        }
+        createMediaStreamSource() {
+          return { connect, disconnect: vi.fn() }
+        }
+        close() {
+          return Promise.resolve()
+        }
+      },
+    )
+    vi.stubGlobal('MediaStream', class {
+      tracks: MediaStreamTrack[]
+      constructor(tracks: MediaStreamTrack[]) {
+        this.tracks = tracks
+      }
+    })
+    await session.start({ room: 'studio', label: 'Me' })
+    const link = FakeLink.latest()
+    const mic = fakeTrack('audio')
+    await session.produce('mic', mic)
+    expect(link.slots.get('audio')).toBe(mic)
+    await session.produce('screen-audio', fakeTrack('audio'))
+    expect(link.slots.get('audio')).toBe(destinationTrack)
+    expect(connect).toHaveBeenCalledTimes(2)
+    await session.closeProducer('screen-audio')
+    expect(link.slots.get('audio')).toBe(mic)
+  })
+
+  it('never sends what the role may not publish', async () => {
+    signaling.role = 'viewer'
+    await session.start({ room: 'studio', label: 'Watcher', role: 'viewer' })
+    await session.produce('camera', fakeTrack('video'))
+    expect(FakeLink.latest().slots.get('camera') ?? null).toBeNull()
+    expect(session.current.producers[0]).toMatchObject({ paused: true })
+  })
+
+  it('sends the program only for a director', async () => {
+    await session.start({ room: 'studio', label: 'Guest' })
+    await session.produce('program', fakeTrack('video'))
+    expect(FakeLink.latest().slots.get('camera') ?? null).toBeNull()
+
+    session.leave()
+    signaling = new FakeSignaling()
+    signaling.role = 'director'
+    session = makeSession()
+    await session.start({ room: 'studio', label: 'Studio' })
+    const program = fakeTrack('video')
+    await session.produce('program', program)
+    expect(FakeLink.latest().slots.get('camera')).toBe(program)
+  })
+
+  it('skips ended tracks', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const ended = { ...fakeTrack('video'), readyState: 'ended' } as MediaStreamTrack
+    await session.produce('camera', ended)
+    expect(FakeLink.latest().slots.get('camera') ?? null).toBeNull()
   })
 })
 
-describe('consuming', () => {
-  it('drops a consumer whose producer closed while the consume call was in flight', async () => {
-    signaling.participants = [participant('a')]
+describe('receiving', () => {
+  it('shows media only from listed participants allowed to publish it, never its own', async () => {
+    signaling.participants = [participant('a'), participant('v', 'viewer')]
     await session.start({ room: 'studio', label: 'Me' })
-    const info = producerInfo('pa1', 'a', 'camera', 'video')
-    signaling.producers = [info]
-    const realRequest = signaling.request.bind(signaling)
-    signaling.request = (async (method: string, params: unknown) => {
-      const result = await realRequest(method as never, params as never)
-      if (method === 'consume') {
-        // The server closes the producer before our consume call returns.
-        signaling.notify('producerClosed', { producerId: 'pa1', participantId: 'a' })
-        signaling.notify('consumerClosed', { consumerId: (result as { consumerId: string }).consumerId })
-      }
-      return result
-    }) as typeof signaling.request
-    signaling.notify('newProducer', { producer: info })
-    await flush()
-    await flush()
+    const added = vi.fn()
+    session.on('trackAdded', added)
+    const link = FakeLink.latest()
+    link.deliver({ id: 'a-v0', ownerId: 'a' })
+    link.deliver({ id: 'a-a0', ownerId: 'a', kind: 'audio', source: 'mic' })
+    link.deliver({ id: 'v-v0', ownerId: 'v' })
+    link.deliver({ id: 'me-v0', ownerId: 'self-1' })
+    link.deliver({ id: 'anon-v0', ownerId: null })
+    link.deliver({ id: 'a-prog', ownerId: 'a', source: 'program' })
+    expect(ids(session.current.tracks)).toEqual(['a-a0', 'a-v0'])
+    expect(session.current.tracks.find((t) => t.consumerId === 'a-v0')).toMatchObject({
+      participantId: 'a',
+      source: 'camera',
+      kind: 'video',
+      producerPaused: false,
+    })
+    expect(added).toHaveBeenCalledTimes(2)
+  })
+
+  it('holds a track until the server lists its sender, and drops it when they leave', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const removed = vi.fn()
+    session.on('trackRemoved', removed)
+    const left = vi.fn()
+    session.on('participantLeft', left)
+    const link = FakeLink.latest()
+    link.deliver({ id: 'b-v0', ownerId: 'b' })
     expect(session.current.tracks).toEqual([])
-    expect(device.transports[1]?.consumers.every((c) => c.closed)).toBe(true)
-  })
-
-  it('consumes every producer present at join, resumes each, and never its own', async () => {
-    signaling.participants = [participant('a')]
-    signaling.producers = [
-      producerInfo('pa1', 'a', 'mic', 'audio'),
-      producerInfo('pa2', 'a', 'camera', 'video'),
-      producerInfo('pself', 'self-1', 'mic', 'audio'),
-    ]
-    const added: RemoteTrack[] = []
-    session.on('trackAdded', (track) => added.push(track))
-    await session.start({ room: 'studio', label: 'Me' })
-    expect(added.map((t) => t.producerId).sort()).toEqual(['pa1', 'pa2'])
-    expect(session.current.tracks).toHaveLength(2)
-    expect(signaling.requests.filter((r) => r.method === 'resumeConsumer')).toHaveLength(2)
-    expect(signaling.requests.filter((r) => r.method === 'consume')).toHaveLength(2)
-  })
-
-  it('consumes a producer announced later, exactly once even if announced twice', async () => {
-    signaling.participants = [participant('a')]
-    await session.start({ room: 'studio', label: 'Me' })
-    const info = producerInfo('pa1', 'a', 'camera', 'video')
-    signaling.producers = [info]
-    signaling.notify('newProducer', { producer: info })
-    signaling.notify('newProducer', { producer: info })
-    await flush()
-    await flush()
-    expect(session.current.tracks).toHaveLength(1)
-    expect(signaling.requests.filter((r) => r.method === 'consume')).toHaveLength(1)
-  })
-
-  it('drops the track when the producer closes or the participant leaves', async () => {
-    signaling.participants = [participant('a'), participant('b')]
-    signaling.producers = [producerInfo('pa1', 'a', 'mic', 'audio'), producerInfo('pb1', 'b', 'mic', 'audio')]
-    const removed: string[] = []
-    session.on('trackRemoved', (track) => removed.push(track.producerId))
-    const left: string[] = []
-    session.on('participantLeft', (id) => left.push(id))
-    await session.start({ room: 'studio', label: 'Me' })
-
-    signaling.notify('producerClosed', { producerId: 'pa1', participantId: 'a' })
-    expect(session.current.tracks.map((t) => t.producerId)).toEqual(['pb1'])
-    expect(removed).toEqual(['pa1'])
-
+    signaling.notify('participantJoined', { participant: participant('b') })
+    expect(ids(session.current.tracks)).toEqual(['b-v0'])
     signaling.notify('participantLeft', { participantId: 'b' })
     expect(session.current.tracks).toEqual([])
-    expect(session.current.participants).toEqual([participant('a')])
-    expect(left).toEqual(['b'])
-    expect(removed).toEqual(['pa1', 'pb1'])
+    expect(removed).toHaveBeenCalledTimes(1)
+    expect(left).toHaveBeenCalledWith('b')
   })
 
-  it('reflects pause and resume of a remote producer', async () => {
+  it('drops a track the conference removed, once', async () => {
     signaling.participants = [participant('a')]
-    signaling.producers = [producerInfo('pa1', 'a', 'camera', 'video')]
     await session.start({ room: 'studio', label: 'Me' })
-    signaling.notify('producerPaused', { producerId: 'pa1' })
-    expect(session.current.tracks[0]?.producerPaused).toBe(true)
-    signaling.notify('consumerResumed', { consumerId: 'c1' })
-    expect(session.current.tracks[0]?.producerPaused).toBe(false)
+    const link = FakeLink.latest()
+    link.deliver({ id: 'a-v0', ownerId: 'a' })
+    link.remove('a-v0')
+    link.remove('a-v0')
+    expect(session.current.tracks).toEqual([])
+  })
+
+  it('follows a participant demoted to viewer', async () => {
+    signaling.participants = [participant('a')]
+    await session.start({ room: 'studio', label: 'Me' })
+    FakeLink.latest().deliver({ id: 'a-v0', ownerId: 'a' })
+    signaling.notify('participantUpdated', { participant: participant('a', 'viewer') })
+    expect(session.current.tracks).toEqual([])
   })
 })
 
@@ -248,15 +272,17 @@ describe('roster and control', () => {
     expect(session.current.self?.onAir).toBe(true)
   })
 
-  it('delivers control commands and relays refusals', async () => {
+  it('delivers control commands, sends its own, and reads keys', async () => {
     await session.start({ room: 'studio', label: 'Me' })
     const received: unknown[] = []
     session.on('control', (event) => received.push(event))
     signaling.notify('control', { from: 'dir', command: { action: 'mute-mic', muted: true } })
     expect(received).toEqual([{ from: 'dir', command: { action: 'mute-mic', muted: true } }])
-
     await session.control('a', { action: 'cue', text: 'go' })
     expect(signaling.requests.at(-1)).toMatchObject({ method: 'control', params: { target: 'a' } })
+    await expect(session.getRoomKeys()).resolves.toEqual({ directorKey: 'dk', producerKey: 'pk' })
+    await session.updateState({ sharing: true })
+    expect(signaling.requests.at(-1)).toMatchObject({ method: 'updateState', params: { sharing: true } })
   })
 
   it('leaves when the server closes the session and reports why', async () => {
@@ -267,126 +293,134 @@ describe('roster and control', () => {
     expect(session.current.status).toBe('closed')
     expect(session.current.closedBecause).toBe('kicked')
     expect(errors).toEqual(['removed'])
-  })
-})
-
-describe('reconnection', () => {
-  it('resumes: same identity, transports kept, ICE restarted, no duplicate consumers', async () => {
-    signaling.participants = [participant('a')]
-    signaling.producers = [producerInfo('pa1', 'a', 'mic', 'audio')]
-    await session.start({ room: 'studio', label: 'Me' })
-    await session.produce('camera', fakeTrack('video'))
-    const [send, recv] = device.transports as [typeof device.transports[0], typeof device.transports[0]]
-
-    signaling.resumeNext = true
-    await signaling.dropAndReconnect()
-
-    const snapshot = session.current
-    expect(snapshot.status).toBe('joined')
-    expect(snapshot.self?.id).toBe('self-1')
-    expect(device.transports).toHaveLength(2)
-    expect(send.iceRestarts).toBe(1)
-    expect(recv.iceRestarts).toBe(1)
-    expect(snapshot.tracks).toHaveLength(1)
-    expect(snapshot.producers.map((p) => p.source)).toEqual(['camera'])
-    const joins = signaling.requests.filter((r) => r.method === 'join')
-    expect(joins).toHaveLength(2)
-    expect((joins[1]?.params as { resumeToken?: string }).resumeToken).toBe('token-1')
-  })
-
-  it('rebuilds everything when the server forgot the session', async () => {
-    signaling.participants = [participant('a')]
-    signaling.producers = [producerInfo('pa1', 'a', 'mic', 'audio')]
-    await session.start({ room: 'studio', label: 'Me' })
-    const camera = fakeTrack('video')
-    await session.produce('camera', camera)
-    const removed: string[] = []
-    session.on('trackRemoved', (t) => removed.push(t.producerId))
-
-    signaling.resumeNext = false
-    await signaling.dropAndReconnect()
-
-    expect(session.current.status).toBe('joined')
-    // Old transports closed, new pair created.
-    expect(device.transports).toHaveLength(4)
-    expect(device.transports[0]?.closed).toBe(true)
-    expect(device.transports[1]?.closed).toBe(true)
-    // Local camera re-published on the new send transport; remote re-consumed once.
-    expect(device.transports[2]?.producers.map((p) => p.track)).toEqual([camera])
-    expect(session.current.tracks).toHaveLength(1)
-    expect(removed).toEqual(['pa1'])
-  })
-
-  it('restarts ICE when a transport fails', async () => {
-    await session.start({ room: 'studio', label: 'Me' })
-    await session.produce('mic', fakeTrack('audio'))
-    const send = device.transports[0]!
-    send.fail()
-    await flush()
-    expect(send.iceRestarts).toBe(1)
-    expect(signaling.requests.some((r) => r.method === 'restartIce')).toBe(true)
-  })
-
-  it('checkHealth restarts only disconnected transports', async () => {
-    await session.start({ room: 'studio', label: 'Me' })
-    await session.produce('mic', fakeTrack('audio'))
-    const [send, recv] = device.transports
-    send!.connectionState = 'disconnected'
-    await session.checkHealth()
-    expect(send!.iceRestarts).toBe(1)
-    expect(recv!.iceRestarts).toBe(0)
-  })
-})
-
-describe('queries and knobs', () => {
-  it('exposes transport and consumer stats, layer knobs and room keys', async () => {
-    signaling.participants = [participant('a')]
-    signaling.producers = [producerInfo('pa1', 'a', 'camera', 'video')]
-    await session.start({ room: 'studio', label: 'Me' })
-    await session.produce('camera', fakeTrack('video'))
-
-    const stats = await session.getStats()
-    expect(stats.send).not.toBeNull()
-    expect(stats.recv).not.toBeNull()
-    const perConsumer = await session.getConsumerStats()
-    expect([...perConsumer.keys()]).toEqual(['a'])
-
-    await session.setPreferredSpatialLayer(0)
-    expect(signaling.requests.at(-1)).toMatchObject({ method: 'setConsumerLayers', params: { spatialLayer: 0 } })
-    await session.setMaxSpatialLayer('camera', 1)
-    expect(device.transports[0]?.producers[0]?.maxSpatialLayer).toBe(1)
-    await session.setMaxSpatialLayer('mic', 0) // no such producer: a no-op
-
-    await expect(session.getRoomKeys()).resolves.toEqual({ directorKey: 'dk', producerKey: 'pk' })
-    await session.updateState({ micMuted: true })
-    expect(signaling.requests.at(-1)).toMatchObject({ method: 'updateState', params: { micMuted: true } })
-    session.reconnectNow()
-  })
-
-  it('reports support from the globals it needs', () => {
-    expect(MediaSession.isSupported()).toBe(typeof RTCPeerConnection !== 'undefined' && typeof WebSocket !== 'undefined')
+    expect(FakeLink.latest().left).toBe(true)
   })
 
   it('refuses control and keys before a session exists', async () => {
     await expect(session.control('a', { action: 'kick' })).rejects.toMatchObject({ code: 'not-joined' })
     await expect(session.getRoomKeys()).rejects.toMatchObject({ code: 'not-joined' })
-    await session.updateState({ sharing: true }) // not joined: silently ignored
+    await session.updateState({ sharing: true })
     expect(signaling.requests).toEqual([])
+  })
+})
+
+describe('recovery', () => {
+  it('keeps the conference when the server resumes the same participant', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    signaling.resumeNext = true
+    await signaling.dropAndReconnect()
+    expect(FakeLink.created).toHaveLength(1)
+    expect(FakeLink.latest().left).toBe(false)
+    expect(signaling.requests.filter((r) => r.method === 'join').at(-1)).toMatchObject({ params: { resumeToken: 'token-1' } })
+    expect(session.current.status).toBe('joined')
+  })
+
+  it('rejoins the conference with the new identity when the server forgot it', async () => {
+    signaling.participants = [participant('a')]
+    await session.start({ room: 'studio', label: 'Me' })
+    const first = FakeLink.latest()
+    first.deliver({ id: 'a-v0', ownerId: 'a' })
+    const camera = fakeTrack('video')
+    await session.produce('camera', camera)
+    signaling.selfId = 'self-2'
+    await signaling.dropAndReconnect()
+    const second = FakeLink.latest()
+    expect(second).not.toBe(first)
+    expect(first.left).toBe(true)
+    expect(second.joins[0]?.jwt).toBe('grant-2')
+    expect(second.slots.get('camera')).toBe(camera)
+    expect(session.current.self?.id).toBe('self-2')
+    // The old conference's tracks went with it.
+    expect(session.current.tracks).toEqual([])
+  })
+
+  it('rejoins a dropped conference with a fresh grant', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const first = FakeLink.latest()
+    const errors: string[] = []
+    session.on('error', (m) => errors.push(m))
+    first.fail('The media server is restarting.')
+    await settle()
+    expect(errors).toContain('The media server is restarting.')
+    expect(signaling.count('getMediaGrant')).toBe(1)
+    expect(FakeLink.latest()).not.toBe(first)
+    expect(FakeLink.latest().joins[0]?.jwt).toBe('grant-2')
+    expect(session.current.recvTransport).toBe('connected')
+  })
+
+  it('gives up after repeated failures and says so', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    signaling.failAlways.add('getMediaGrant')
+    FakeLink.latest().fail('lost')
+    await vi.waitFor(() => expect(session.current.status).toBe('failed'))
+    expect(signaling.count('getMediaGrant')).toBe(3)
+    expect(session.current.status).toBe('failed')
+    expect(session.current.error).toMatch(/could not be restored/)
+  })
+
+  it('checkHealth rejoins a conference that failed, and leaves a healthy one alone', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    await session.checkHealth()
+    expect(FakeLink.created).toHaveLength(1)
+    FakeLink.latest().emitState('failed')
+    await session.checkHealth()
+    expect(FakeLink.created).toHaveLength(2)
+  })
+})
+
+describe('quality and stats', () => {
+  it('maps quality tiers to video heights', async () => {
+    await session.start({ room: 'studio', label: 'Me' })
+    const link = FakeLink.latest()
+    await session.setPreferredSpatialLayer(0)
+    expect(link.receiveMaxHeight).toBe(180)
+    await session.setPreferredSpatialLayer(9)
+    expect(link.receiveMaxHeight).toBe(720)
+    await session.setMaxSpatialLayer('camera', 1)
+    expect(link.sendMaxHeight).toBe(360)
+    await session.setMaxSpatialLayer('screen', 0)
+    expect(link.sendMaxHeight).toBe(360)
+  })
+
+  it('splits the connection’s stats by direction and by participant', async () => {
+    signaling.participants = [participant('a'), participant('b')]
+    await session.start({ room: 'studio', label: 'Me' })
+    const link = FakeLink.latest()
+    expect(await session.getStats()).toEqual({ send: null, recv: null })
+    link.deliver({ id: 'a-v0', ownerId: 'a' })
+    link.deliver({ id: 'b-v0', ownerId: 'b' })
+    link.stats = new Map<string, Record<string, unknown>>([
+      ['out', { type: 'outbound-rtp', bytesSent: 10 }],
+      ['in-a', { type: 'inbound-rtp', trackIdentifier: 'mst-a-v0', bytesReceived: 5 }],
+      ['in-b', { type: 'inbound-rtp', trackIdentifier: 'mst-b-v0', bytesReceived: 7 }],
+      ['pair', { type: 'candidate-pair', state: 'succeeded' }],
+      ['codec', { type: 'codec' }],
+    ]) as unknown as RTCStatsReport
+    const { send, recv } = await session.getStats()
+    expect([...(send as unknown as Map<string, unknown>).keys()]).toEqual(['out', 'pair'])
+    expect([...(recv as unknown as Map<string, unknown>).keys()]).toEqual(['in-a', 'in-b', 'pair'])
+    const perParticipant = await session.getConsumerStats()
+    expect([...(perParticipant.get('a') as unknown as Map<string, unknown>).keys()]).toEqual(['in-a', 'pair'])
+    expect([...(perParticipant.get('b') as unknown as Map<string, unknown>).keys()]).toEqual(['in-b', 'pair'])
+  })
+
+  it('reports support from the globals it needs', () => {
+    expect(MediaSession.isSupported()).toBe(typeof RTCPeerConnection !== 'undefined' && typeof WebSocket !== 'undefined')
   })
 })
 
 describe('leave', () => {
   it('closes everything once and reports removed tracks', async () => {
     signaling.participants = [participant('a')]
-    signaling.producers = [producerInfo('pa1', 'a', 'mic', 'audio')]
     await session.start({ room: 'studio', label: 'Me' })
+    FakeLink.latest().deliver({ id: 'a-a0', ownerId: 'a', kind: 'audio', source: 'mic' })
     const removed = vi.fn()
     session.on('trackRemoved', removed)
     session.leave()
     session.leave()
     expect(session.current.status).toBe('closed')
     expect(signaling.requests.at(-1)?.method).toBe('leave')
-    expect(device.transports.every((t) => t.closed)).toBe(true)
+    expect(FakeLink.latest().left).toBe(true)
     expect(removed).toHaveBeenCalledTimes(1)
     expect(signaling.state).toBe('closed')
   })

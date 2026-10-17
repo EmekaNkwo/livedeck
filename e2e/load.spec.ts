@@ -9,12 +9,13 @@ import { HEALTH_URL, guestTiles, openDirector, openTab, pointAtMediaServer } fro
  * control room, consumes everyone, cues them and records the program.
  *
  * Measured and asserted:
- *   - the server reports 12 peers, 25 producers (12 mic + 12 camera + 1 screen);
+ *   - the server reports 13 participants, and the director's session holds a
+ *     camera from every guest and the screen (media through Jitsi);
  *   - every guest decodes every other guest's video;
  *   - the director has 12 tiles, 12 connected, no duplicates;
  *   - per page over a 20 s recording window: CPU busy %, JS heap, packet
- *     loss, jitter, RTT and uplink estimate; server producer/consumer counts
- *     and per-worker room load from /healthz.
+ *     loss, jitter, RTT and uplink estimate; the server's room counts from
+ *     /healthz.
  *
  * It is heavy, so it runs only when LIVEDECK_LOAD=1:
  *
@@ -158,15 +159,19 @@ test.describe('Scenario L: twelve participants', () => {
         ...(network[index] ?? {}),
       }
     })
-    const finalHealth = (await (await page.request.get(HEALTH_URL)).json()) as { producers: number; peers: number }
+    const finalHealth = (await (await page.request.get(HEALTH_URL)).json()) as { peers: number }
+    const directorVideo = await page.evaluate(() => {
+      const session = (window as unknown as { __livedeckSession?: { current: { tracks: Array<{ kind: string; source: string; participantId: string }> } } }).__livedeckSession
+      const video = session?.current.tracks.filter((track) => track.kind === 'video') ?? []
+      return { cameras: new Set(video.filter((t) => t.source === 'camera').map((t) => t.participantId)).size, screens: video.filter((t) => t.source === 'screen').length }
+    })
     test.info().annotations.push({ type: 'load-metrics', description: JSON.stringify({ server: finalHealth, metrics }) })
     console.info('[load] server', JSON.stringify(finalHealth))
     console.table(metrics)
     for (const session of cdp) await session.detach().catch(() => undefined)
 
-    // The server's media objects match the room: 12 cameras + 12 mics + the
-    // screen (+ its audio when the platform provided a track).
-    expect(finalHealth.producers).toBeGreaterThanOrEqual(PARTICIPANTS * 2 + 1)
+    // Every guest's camera and the shared screen reached the director.
+    expect(directorVideo).toEqual({ cameras: PARTICIPANTS, screens: 1 })
     expect(finalHealth.peers).toBe(PARTICIPANTS + 1)
 
     /*

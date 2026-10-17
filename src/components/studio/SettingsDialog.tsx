@@ -158,42 +158,13 @@ export function SettingsDialog() {
             <Notice tone="warning">{settings.signalingConfigError}</Notice>
           ) : null}
           <Notice>
-            Every participant&apos;s audio and video is routed through this server (an SFU), which
-            is what lets a room hold a dozen people without each of them sending to everyone else.
-            Roles are decided by the server from the key in a link: a room name alone grants the
+            This server runs the room: who is in it, what each person may do, and the director&apos;s
+            controls. Audio and video travel through Jitsi, which the server admits each participant
+            to. Roles are decided by the server from the key in a link: a room name alone grants the
             guest role and nothing more.
           </Notice>
         </section>
 
-        <section className="flex flex-col gap-3 border-t border-deck-700 pt-4">
-          <h3 className="text-xs font-semibold text-ink-100">ICE servers</h3>
-          <TextField
-            label="STUN / TURN URLs"
-            hint="Optional extras, one per line, merged after the servers the media server issues. For TURN, append credentials as turn:host:port|username:password."
-            value={settings.settings.iceServerUrls.join('\n')}
-            onChange={(value) =>
-              settings.setIceServerUrls(
-                value
-                  .split('\n')
-                  .map((line) => line.trim())
-                  .filter(Boolean),
-              )
-            }
-          />
-          <Notice>
-            Normally empty: the media server hands every session its own STUN servers and, when it
-            is configured with one, short-lived TURN credentials. Add servers here only for a relay
-            the operator runs separately. Changes apply to connections made from now on.
-          </Notice>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="self-start"
-            onClick={() => settings.setIceServerUrls([])}
-          >
-            Clear extra servers
-          </Button>
-        </section>
       </div>
     </Dialog>
   )

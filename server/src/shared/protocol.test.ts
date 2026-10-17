@@ -121,6 +121,7 @@ describe('parseServerMessage', () => {
   it('validates response results per method', () => {
     expect(parseResponseResult('ping', { at: 1 })).toEqual({ at: 1 })
     expect(parseResponseResult('ping', { nope: 1 })).toBeNull()
-    expect(parseResponseResult('produce', { producerId: 'x' })).toEqual({ producerId: 'x' })
+    expect(parseResponseResult('getRoomKeys', { directorKey: 'd', producerKey: 'p' })).toEqual({ directorKey: 'd', producerKey: 'p' })
+    expect(parseResponseResult('getMediaGrant', { provider: 'jaas', domain: '8x8.vc', appId: 'a', room: 'r', jwt: 'j', expiresAt: 1, libraryUrl: 'not a url' })).toBeNull()
   })
 })

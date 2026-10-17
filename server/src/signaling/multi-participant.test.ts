@@ -10,24 +10,24 @@ import {
   type RequestParams,
   type ResponseResult,
 } from '../../../shared/protocol'
-import type { MediasoupConfig } from '../mediasoup/config'
-import type { WorkerPool } from '../mediasoup/worker-pool'
 import { createRoomManager, type RoomManager } from '../rooms/room-manager'
-import { audioRtpParameters, createTestPool, quietLog, videoRtpParameters } from '../test/fixtures'
+import { decodeJwt, quietLog, testGrants } from '../test/fixtures'
 import { createKeyService } from './authorization'
 import { attachSignaling, type SignalingServer } from './server'
 
 /**
- * Rooms of 1, 2, 4, 6, 8 and 12 participants, each publishing a microphone
- * and a camera and consuming everyone else's, over the real server and real
- * mediasoup routers.
+ * Rooms of 1, 2, 4, 6, 8 and 12 participants over the real server.
  *
- * What is checked for every room size:
- *   - every participant ends with exactly (n-1) × 2 consumers;
- *   - no consumer is for the participant's own producer (mix-minus);
- *   - no producer is consumed twice by the same participant;
- *   - the server's totals match: n peers, 2n producers;
- *   - leaving tears down the room completely.
+ * Media flows through Jitsi, which these tests do not run (the browser suite
+ * does). What is checked here, for every room size, is the part the server
+ * owns:
+ *   - everyone sees the full roster, and joins are announced to everyone
+ *     already there;
+ *   - every participant gets a media grant naming them, for this room only,
+ *     with no two participants sharing an identity;
+ *   - authority holds at every size: the director controls the last guest,
+ *     and no guest controls the director;
+ *   - leaving tears the room down to nothing.
  */
 
 type Notification = Extract<ParsedServerMessage, { kind: 'notification' }>
@@ -38,7 +38,9 @@ class Client {
   private nextId = 1
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   readonly notifications: Notification[] = []
-  readonly consumed = new Map<string, string>() // producerId → consumerId
+  grantUserId = ''
+  grantRoom = ''
+  rosterAtJoin = -1
 
   static async connect(port: number): Promise<Client> {
     const client = new Client()
@@ -79,8 +81,6 @@ class Client {
   }
 }
 
-let pool: WorkerPool
-let config: MediasoupConfig
 let httpServer: Server
 let signaling: SignalingServer
 let rooms: RoomManager
@@ -89,10 +89,9 @@ const keys = createKeyService('load-test-secret-that-is-long-enough')
 const clients: Client[] = []
 
 beforeAll(async () => {
-  ;({ pool, config } = await createTestPool())
-  rooms = createRoomManager({ pool, config, log: quietLog, limits: { maxPeersPerRoom: 12 } })
+  rooms = createRoomManager({ log: quietLog, limits: { maxPeersPerRoom: 12 } })
   httpServer = createServer((_req, res) => res.end())
-  signaling = attachSignaling(httpServer, { rooms, keys, turn: null, log: quietLog, resumeGraceMs: 200 })
+  signaling = attachSignaling(httpServer, { rooms, keys, grants: testGrants(), log: quietLog, resumeGraceMs: 200 })
   await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve))
   port = (httpServer.address() as AddressInfo).port
 })
@@ -100,74 +99,39 @@ afterAll(async () => {
   await signaling.close()
   rooms.closeAll()
   await new Promise<void>((resolve) => httpServer.close(() => resolve()))
-  await pool.close()
 })
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()))
   await new Promise((resolve) => setTimeout(resolve, 300))
 })
 
-async function joinAndPublish(room: string, index: number): Promise<Client> {
+async function joinRoom(room: string, index: number): Promise<Client> {
   const client = await Client.connect(port)
   clients.push(client)
   const joined = await client.request('join', { room, label: `g${index}`, key: index === 0 ? keys.keysFor(room).directorKey : undefined })
   client.id = joined.participantId
-  const send = await client.request('createWebRtcTransport', { direction: 'send' })
-  await client.request('createWebRtcTransport', { direction: 'recv' })
-  await client.request('produce', { transportId: send.id, kind: 'audio', rtpParameters: audioRtpParameters(10_000 + index * 2), source: 'mic' })
-  await client.request('produce', { transportId: send.id, kind: 'video', rtpParameters: videoRtpParameters(10_001 + index * 2), source: 'camera' })
+  client.grantUserId = (decodeJwt(joined.media.jwt).payload.context as { user: { id: string } }).user.id
+  client.grantRoom = joined.media.room
+  client.rosterAtJoin = joined.participants.length
   return client
 }
 
-async function consumeEverything(client: Client, room: string): Promise<void> {
-  const caps = (await client.request('getRouterRtpCapabilities', {})).rtpCapabilities
-  // The server knows every producer; ask for each one, as a client would on
-  // join and on each newProducer notification.
-  const roomState = rooms.get(room)
-  for (const producer of roomState?.producers() ?? []) {
-    if (producer.participantId === client.id) {
-      await expect(client.request('consume', { producerId: producer.id, rtpCapabilities: caps })).rejects.toMatchObject({ code: 'forbidden' })
-      continue
-    }
-    const consumed = await client.request('consume', { producerId: producer.id, rtpCapabilities: caps })
-    // A repeat is the same consumer, not a second one.
-    const again = await client.request('consume', { producerId: producer.id, rtpCapabilities: caps })
-    expect(again.consumerId).toBe(consumed.consumerId)
-    client.consumed.set(producer.id, consumed.consumerId)
-    await client.request('resumeConsumer', { consumerId: consumed.consumerId })
-  }
-}
-
 describe.each([1, 2, 4, 6, 8, 12])('a room of %i', (size) => {
-  it('gives every participant everyone else exactly once, never themselves', async () => {
+  it('rosters, grants and authority hold for everyone', async () => {
     const room = `load-${size}`
     const members: Client[] = []
-    for (let i = 0; i < size; i += 1) members.push(await joinAndPublish(room, i))
-    for (const member of members) await consumeEverything(member, room)
+    for (let i = 0; i < size; i += 1) members.push(await joinRoom(room, i))
 
-    const state = rooms.get(room)
-    expect(state?.peers.size).toBe(size)
-    expect(state?.producers()).toHaveLength(size * 2)
-
-    for (const member of members) {
-      expect(member.consumed.size).toBe((size - 1) * 2)
-      const peer = state?.peers.get(member.id)
-      expect(peer?.consumers.size).toBe((size - 1) * 2)
-      for (const entry of peer?.consumers.values() ?? []) {
-        expect(entry.producerPeerId).not.toBe(member.id)
-      }
-      // Each producer consumed by this member appears once.
-      const producerIds = [...(peer?.consumers.values() ?? [])].map((c) => c.producerId)
-      expect(new Set(producerIds).size).toBe(producerIds.length)
-    }
-
-    // Everyone heard about everyone else's producers.
-    for (const member of members) {
-      const announced = member.notifications.filter((n) => n.event === 'newProducer').length
-      // Producers published after this member joined.
-      const index = members.indexOf(member)
-      expect(announced).toBe((size - 1 - index) * 2)
-    }
+    expect(rooms.get(room)?.peers.size).toBe(size)
+    members.forEach((member, index) => {
+      // Each joiner saw everyone who was already there.
+      expect(member.rosterAtJoin).toBe(index)
+      // And heard about everyone who came after.
+      expect(member.notifications.filter((n) => n.event === 'participantJoined')).toHaveLength(size - 1 - index)
+      expect(member.grantUserId).toBe(member.id)
+      expect(member.grantRoom).toBe(`livedeck-${room}`)
+    })
+    expect(new Set(members.map((member) => member.grantUserId)).size).toBe(size)
 
     // The director (index 0) can mute the last guest; the last guest cannot mute the director.
     if (size > 1) {

@@ -39,7 +39,6 @@ export type UseStudioSettings = {
   setSnapThreshold: (px: number) => void
   setShowSafeAreas: (enabled: boolean) => void
   setReducedMotion: (mode: StudioSettings['reducedMotion']) => void
-  setIceServerUrls: (urls: string[]) => void
   setSignalingServerUrl: (url: string) => void
   /** `null` when the current transport configuration is usable. */
   signalingConfigError: string | null
@@ -93,7 +92,6 @@ export function useStudioSettings(): UseStudioSettings {
   const setSnapThreshold = useSettingsStore((state) => state.setSnapThreshold)
   const setShowSafeAreas = useSettingsStore((state) => state.setShowSafeAreas)
   const setReducedMotion = useSettingsStore((state) => state.setReducedMotion)
-  const setIceServerUrls = useSettingsStore((state) => state.setIceServerUrls)
   const setSignalingServerUrl = useSettingsStore((state) => state.setSignalingServerUrl)
   const reset = useSettingsStore((state) => state.reset)
 
@@ -204,7 +202,6 @@ export function useStudioSettings(): UseStudioSettings {
     setSnapThreshold,
     setShowSafeAreas,
     setReducedMotion,
-    setIceServerUrls,
     setSignalingServerUrl,
     signalingConfigError,
     reset,

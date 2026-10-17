@@ -13,14 +13,14 @@ describe('rate limiter', () => {
   it('keeps categories independent', () => {
     let now = 0
     const limiter = createRateLimiter(
-      { ...{ room: { capacity: 2, refillPerSecond: 1 } }, media: { capacity: 2, refillPerSecond: 1 }, ice: { capacity: 1, refillPerSecond: 1 }, control: { capacity: 1, refillPerSecond: 1 }, keepalive: { capacity: 1, refillPerSecond: 1 } },
+      { ...{ room: { capacity: 2, refillPerSecond: 1 } }, media: { capacity: 2, refillPerSecond: 1 }, control: { capacity: 1, refillPerSecond: 1 }, keepalive: { capacity: 1, refillPerSecond: 1 } },
       () => now,
     )
     expect(limiter.allow('room')).toBe(true)
     expect(limiter.allow('room')).toBe(true)
     expect(limiter.allow('room')).toBe(false)
-    // Exhausting room ops does not touch ICE.
-    expect(limiter.allow('ice')).toBe(true)
+    // Exhausting room ops does not touch media grants.
+    expect(limiter.allow('media')).toBe(true)
     now = 2000
     expect(limiter.allow('room')).toBe(true)
   })
@@ -28,7 +28,7 @@ describe('rate limiter', () => {
   it('refills continuously, not per window', () => {
     let now = 0
     const limiter = createRateLimiter(
-      { room: { capacity: 1, refillPerSecond: 2 }, media: { capacity: 1, refillPerSecond: 1 }, ice: { capacity: 1, refillPerSecond: 1 }, control: { capacity: 1, refillPerSecond: 1 }, keepalive: { capacity: 1, refillPerSecond: 1 } },
+      { room: { capacity: 1, refillPerSecond: 2 }, media: { capacity: 1, refillPerSecond: 1 }, control: { capacity: 1, refillPerSecond: 1 }, keepalive: { capacity: 1, refillPerSecond: 1 } },
       () => now,
     )
     expect(limiter.allow('room')).toBe(true)

@@ -17,7 +17,9 @@
     "e2e:install": "playwright install chromium",
     "e2e:ui": "playwright test --ui",
     "verify": "npm run typecheck && npm run lint && npm run test",
-    "coverage:all": "node scripts/coverage-all.mjs"
+    "coverage:all": "node scripts/coverage-all.mjs",
+    "jitsi:up": "bash deploy/jitsi-local/jitsi-local.sh up",
+    "jitsi:down": "bash deploy/jitsi-local/jitsi-local.sh down"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
@@ -26,7 +28,6 @@
     "framer-motion": "^14.1.0",
     "lucide-react": "^1.55.0",
     "mediabunny": "1.60.0",
-    "mediasoup-client": "^3.24.5",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-error-boundary": "^6.1.6",

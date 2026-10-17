@@ -1,15 +1,15 @@
-import { Device, type types as msTypes } from 'mediasoup-client'
+import { canProduce } from '@shared/authorization'
 import type {
   ControlAction,
-  IceServer,
+  MediaGrant,
   MediaSource,
   NotificationData,
   NotificationEvent,
   Participant,
-  ProducerInfo,
-  Role,
 } from '@shared/protocol'
-import { applyContentHint, encodingFor } from './encodings'
+import { SendAudioMix } from './jitsi/audio-mix'
+import { JitsiLink } from './jitsi/jitsi-link'
+import type { LinkRemoteTrack, MediaLink, SendSlot } from './media-link'
 import { SignalingClient, SignalingError } from './signaling-client'
 import {
   INITIAL_SNAPSHOT,
@@ -23,51 +23,50 @@ import {
 } from './types'
 
 /**
- * One participant's connection to the SFU.
+ * One participant's session: the room on our server, the media on Jitsi.
  *
- * Framework-free. Owns the mediasoup Device, one send and one receive
- * transport, the producers for local media and a consumer per remote
- * producer. Everything the UI needs is in the snapshot; everything that
+ * Framework-free. Everything the UI needs is in the snapshot; everything that
  * must happen *now* (a track arrived, a control command) is an event.
+ *
+ * TWO CONNECTIONS, ONE AUTHORITY
+ * ------------------------------
+ * The LiveDeck server decides who is in the room and what each participant
+ * may do, and signs a Jitsi token naming them. Jitsi carries the audio and
+ * video. Remote media is matched to the roster by the identity in the
+ * sender's token, which the browser cannot forge, and is shown only when the
+ * sender's role may publish that source. A track from someone the server
+ * does not list, or from a viewer, never reaches the studio.
  *
  * THE JOIN SEQUENCE
  * -----------------
- *  1. connect the socket            5. create the receive transport
- *  2. join the room                 6. consume every producer in the room
- *  3. load the Device               7. produce whatever local tracks were
- *  4. create the send transport        requested before or after joining
+ *  1. connect the socket and join the room (roster, role, media grant)
+ *  2. join the Jitsi conference with the grant
+ *  3. send whatever local tracks were requested before or after joining
  *
- * Transports connect lazily: mediasoup-client fires `connect` on the first
- * produce or consume, and that is answered with the signaling request.
- *
- * RECONNECTION
- * ------------
- * The socket reconnects on its own. When it comes back, the session re-joins
- * with its resume token. If the server still has the participant, the
- * transports are restarted (ICE restart) and local producers are kept. If it
- * does not, everything is rebuilt from scratch: new transports, local tracks
- * re-published, remote producers re-consumed. Either way the identity the
- * UI sees is the one the server reports, and nothing is duplicated.
- *
- * IDEMPOTENCY
- * -----------
- * Producers are keyed by source and consumers by producer id. A notification
- * seen twice, or a resume that lists producers already consumed, changes
- * nothing.
+ * RECOVERY
+ * --------
+ * The socket reconnects on its own and re-joins with the resume token. If the
+ * server kept the participant, the conference link is kept too. If it did not,
+ * the participant has a new identity and the link is rebuilt with a new grant.
+ * A conference that drops on its own (an expired token on reconnect, a bridge
+ * restart) is rejoined with a fresh grant, a few times before giving up.
  */
 
 export type MediaSessionOptions = {
   url: string
-  /** Extra ICE servers from settings, merged after the server's. */
-  extraIceServers?: IceServer[]
-  /** Per-step timeout for transport creation and media operations. */
+  /** Per-step timeout for joining. */
   operationTimeoutMs?: number
   /** Injectable for tests. */
   createSignaling?: (url: string) => SignalingClient
-  createDevice?: () => Device
+  createLink?: () => MediaLink
+  /** Delay before rejoining a dropped conference; doubles per attempt. */
+  rejoinDelayMs?: number
 }
 
-const OPERATION_TIMEOUT_MS = 10_000
+const OPERATION_TIMEOUT_MS = 15_000
+const MAX_REJOIN_ATTEMPTS = 3
+/** Video heights for quality tiers 0, 1 and 2. */
+const TIER_HEIGHTS = [180, 360, 720] as const
 
 type Listeners = { [K in keyof SessionEvents]: Set<SessionEvents[K]> }
 
@@ -87,40 +86,43 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
   })
 }
 
+function heightFor(tier: number): number {
+  return TIER_HEIGHTS[Math.max(0, Math.min(TIER_HEIGHTS.length - 1, tier))] ?? 720
+}
+
+/** Split a whole-connection stats report by direction. */
+function filterReport(report: RTCStatsReport, types: ReadonlySet<string>, keep?: (stat: Record<string, unknown>) => boolean): RTCStatsReport {
+  const subset = new Map<string, unknown>()
+  report.forEach((stat: Record<string, unknown>, id: string) => {
+    if (types.has(String(stat.type)) && (!keep || keep(stat))) subset.set(id, stat)
+  })
+  // A Map has RTCStatsReport's read surface (`forEach`, `get`, iteration).
+  return subset as unknown as RTCStatsReport
+}
+
+const SEND_STATS = new Set(['outbound-rtp', 'remote-inbound-rtp', 'candidate-pair'])
+const RECV_STATS = new Set(['inbound-rtp', 'candidate-pair'])
+
 export class MediaSession {
-  private readonly options: Required<Pick<MediaSessionOptions, 'url' | 'operationTimeoutMs'>> &
+  private readonly options: Required<Pick<MediaSessionOptions, 'url' | 'operationTimeoutMs' | 'rejoinDelayMs'>> &
     MediaSessionOptions
   private signaling: SignalingClient | null = null
-  private device: Device | null = null
-  private sendTransport: msTypes.Transport | null = null
-  private recvTransport: msTypes.Transport | null = null
-  /** Local producers by source. One per source, always. */
-  private readonly producers = new Map<MediaSource, msTypes.Producer>()
-  /** Local tracks requested, by source, so a rebuild can re-publish them. */
+  private link: MediaLink | null = null
+  private linkOff: Array<() => void> = []
+  private readonly audioMix = new SendAudioMix()
+  /** Local tracks requested, by source. */
   private readonly localTracks = new Map<MediaSource, MediaStreamTrack>()
-  /** Remote consumers by producer id. */
-  private readonly consumers = new Map<string, msTypes.Consumer>()
-  private readonly consuming = new Set<string>()
-  /**
-   * Producer creation in flight, by source.
-   *
-   * `produce` is called from effects that can fire again before the first
-   * call resolves. Without this, two calls for one source both saw no
-   * producer and created two: the server kept the second, the browser kept
-   * encoding both, and receivers could be handed the one the server had
-   * already closed.
-   */
-  private readonly producing = new Map<MediaSource, Promise<void>>()
-  /** Consumers the server closed while our consume call was still in flight. */
-  private readonly closedConsumerIds = new Set<string>()
+  private readonly paused = new Set<MediaSource>()
+  /** Every remote track the link reported, shown or not. */
+  private readonly remote = new Map<string, LinkRemoteTrack>()
   private readonly participants = new Map<string, Participant>()
-  private readonly knownProducers = new Map<string, ProducerInfo>()
   private join: JoinOptions | null = null
   private resumeToken: string | null = null
-  private iceServers: IceServer[] = []
   private snapshot: SessionSnapshot = INITIAL_SNAPSHOT
   private closed = false
   private recovering = false
+  private rejoinAttempts = 0
+  private rejoinTimer: ReturnType<typeof setTimeout> | null = null
   private readonly listeners: Listeners = {
     snapshot: new Set(),
     control: new Set(),
@@ -132,7 +134,7 @@ export class MediaSession {
   private readonly unsubscribe: Array<() => void> = []
 
   constructor(options: MediaSessionOptions) {
-    this.options = { operationTimeoutMs: OPERATION_TIMEOUT_MS, ...options }
+    this.options = { operationTimeoutMs: OPERATION_TIMEOUT_MS, rejoinDelayMs: 2000, ...options }
   }
 
   /* ------------------------------------------------------------- public */
@@ -151,7 +153,7 @@ export class MediaSession {
     return typeof RTCPeerConnection !== 'undefined' && typeof WebSocket !== 'undefined'
   }
 
-  /** Connect, join and bring up both transports. */
+  /** Connect, join the room and the conference. */
   async start(join: JoinOptions): Promise<void> {
     if (this.closed) throw new Error('This session is closed.')
     if (this.join) throw new Error('This session has already started.')
@@ -173,54 +175,27 @@ export class MediaSession {
     }
   }
 
-  /** Publish a local track. Replaces an existing producer of the same source. */
+  /** Publish a local track. Replaces whatever the source was sending. */
   async produce(source: MediaSource, track: MediaStreamTrack): Promise<void> {
+    if (this.localTracks.get(source) === track) return
     this.localTracks.set(source, track)
-    // A creation already in flight for this source picks up the latest track.
-    const pending = this.producing.get(source)
-    if (pending) {
-      await pending
-      const created = this.producers.get(source)
-      if (created && !created.closed && created.track !== track) await created.replaceTrack({ track })
-      this.publishProducers()
-      return
-    }
-    const existing = this.producers.get(source)
-    if (existing && !existing.closed) {
-      if (existing.track === track) return
-      await existing.replaceTrack({ track })
-      this.publishProducers()
-      return
-    }
-    if (this.snapshot.status !== 'joined') return // published once joined
-    await this.createProducer(source, track)
+    await this.syncSlots()
   }
 
   /** Stop publishing a source. */
   async closeProducer(source: MediaSource): Promise<void> {
-    this.localTracks.delete(source)
-    // A creation in flight finishes first, so it cannot outlive the close.
-    await this.producing.get(source)?.catch(() => undefined)
-    const producer = this.producers.get(source)
-    this.producers.delete(source)
-    if (!producer) return
-    const id = producer.id
-    producer.close()
-    this.publishProducers()
-    if (this.snapshot.status === 'joined') {
-      await this.signaling?.request('closeProducer', { producerId: id }).catch(() => undefined)
-    }
+    if (!this.localTracks.delete(source)) return
+    this.paused.delete(source)
+    await this.syncSlots()
   }
 
+  /** Pausing stops sending the source; resuming sends it again. */
   async pauseProducer(source: MediaSource, paused: boolean): Promise<void> {
-    const producer = this.producers.get(source)
-    if (!producer || producer.closed) return
-    if (paused) producer.pause()
-    else producer.resume()
-    this.publishProducers()
-    await this.signaling
-      ?.request(paused ? 'pauseProducer' : 'resumeProducer', { producerId: producer.id })
-      .catch(() => undefined)
+    if (!this.localTracks.has(source)) return
+    if (paused === this.paused.has(source)) return
+    if (paused) this.paused.add(source)
+    else this.paused.delete(source)
+    await this.syncSlots()
   }
 
   async updateState(state: { micMuted?: boolean; cameraMuted?: boolean; sharing?: boolean }): Promise<void> {
@@ -239,54 +214,39 @@ export class MediaSession {
     return this.signaling.request('getRoomKeys', {})
   }
 
-  /** Transport-level statistics, for the quality manager. */
+  /** Connection statistics, split by direction, for the quality controller. */
   async getStats(): Promise<{ send: RTCStatsReport | null; recv: RTCStatsReport | null }> {
-    const [send, recv] = await Promise.all([
-      this.sendTransport && !this.sendTransport.closed ? this.sendTransport.getStats() : null,
-      this.recvTransport && !this.recvTransport.closed ? this.recvTransport.getStats() : null,
-    ])
-    return { send, recv }
+    const report = await this.link?.getStats().catch(() => null)
+    if (!report) return { send: null, recv: null }
+    return { send: filterReport(report, SEND_STATS), recv: filterReport(report, RECV_STATS) }
   }
 
-  /** Per-consumer statistics, keyed by participant id. */
+  /** Receive statistics per participant, keyed by participant id. */
   async getConsumerStats(): Promise<Map<string, RTCStatsReport>> {
     const result = new Map<string, RTCStatsReport>()
-    await Promise.all(
-      [...this.consumers.values()].map(async (consumer) => {
-        if (consumer.closed) return
-        const participantId = String(consumer.appData.participantId ?? '')
-        try {
-          result.set(participantId, await consumer.getStats())
-        } catch {
-          // A consumer closing mid-sample has no stats; nothing to report.
-        }
-      }),
-    )
+    const report = await this.link?.getStats().catch(() => null)
+    if (!report) return result
+    const ownerOfTrack = new Map(this.snapshot.tracks.map((track) => [track.track.id, track.participantId]))
+    for (const participantId of new Set(ownerOfTrack.values())) {
+      result.set(
+        participantId,
+        filterReport(report, RECV_STATS, (stat) =>
+          stat.type === 'candidate-pair' || ownerOfTrack.get(String(stat.trackIdentifier ?? '')) === participantId,
+        ),
+      )
+    }
     return result
   }
 
-  /** Ask the SFU for a simulcast layer on every remote video consumer. */
+  /** Receive every remote video at this quality tier (0 low, 2 high). */
   async setPreferredSpatialLayer(spatialLayer: number): Promise<void> {
-    const signaling = this.signaling
-    if (!signaling || this.snapshot.status !== 'joined') return
-    await Promise.all(
-      [...this.consumers.values()]
-        .filter((consumer) => consumer.kind === 'video' && !consumer.closed)
-        .map((consumer) =>
-          signaling.request('setConsumerLayers', { consumerId: consumer.id, spatialLayer }).catch(() => undefined),
-        ),
-    )
+    this.link?.setReceiveMaxHeight(heightFor(spatialLayer))
   }
 
-  /** Cap the simulcast layers this participant sends for a source. */
+  /** Cap the camera this participant sends at this quality tier. */
   async setMaxSpatialLayer(source: MediaSource, layer: number): Promise<void> {
-    const producer = this.producers.get(source)
-    if (!producer || producer.closed || producer.kind !== 'video') return
-    try {
-      await producer.setMaxSpatialLayer(layer)
-    } catch {
-      // A single-layer producer (screen) cannot be capped; nothing to do.
-    }
+    if (source !== 'camera') return
+    await this.link?.setSendMaxHeight(heightFor(layer)).catch(() => undefined)
   }
 
   /** The network came back: dial the server now rather than after backoff. */
@@ -297,22 +257,22 @@ export class MediaSession {
   /** Wake-up hook: after a sleep or a network change, make sure media flows. */
   async checkHealth(): Promise<void> {
     if (this.closed || this.snapshot.status !== 'joined') return
-    const stale = [this.sendTransport, this.recvTransport].filter(
-      (transport): transport is msTypes.Transport =>
-        Boolean(transport && !transport.closed) &&
-        (transport?.connectionState === 'disconnected' || transport?.connectionState === 'failed'),
-    )
-    await Promise.all(stale.map((transport) => this.restartIce(transport)))
+    if (this.snapshot.recvTransport === 'failed' || this.snapshot.recvTransport === 'closed') {
+      this.rejoinAttempts = 0
+      await this.rejoinConference()
+    }
   }
 
   /** Leave the room and release everything. Idempotent. */
   leave(): void {
     if (this.closed) return
     this.closed = true
+    if (this.rejoinTimer) clearTimeout(this.rejoinTimer)
     if (this.signaling && this.snapshot.status === 'joined') {
       void this.signaling.request('leave', {}).catch(() => undefined)
     }
-    this.teardownMedia()
+    this.teardownLink()
+    this.audioMix.release()
     for (const off of this.unsubscribe) off()
     this.unsubscribe.length = 0
     this.signaling?.close()
@@ -327,7 +287,6 @@ export class MediaSession {
     const join = this.join
     if (!signaling || !join) return
     this.setStatus(resume ? 'recovering' : 'joining')
-
     const joined = await withTimeout(
       signaling.request('join', {
         room: join.room,
@@ -341,8 +300,7 @@ export class MediaSession {
       'Joining the room',
     )
     this.resumeToken = joined.resumeToken
-    this.iceServers = [...joined.iceServers, ...(this.options.extraIceServers ?? [])]
-
+    const previousSelf = this.snapshot.self
     const self: Participant = {
       id: joined.participantId,
       role: joined.role,
@@ -357,308 +315,125 @@ export class MediaSession {
     for (const participant of joined.participants) {
       if (participant.id !== self.id) this.participants.set(participant.id, participant)
     }
-    this.knownProducers.clear()
-    for (const producer of joined.producers) this.knownProducers.set(producer.id, producer)
-    this.patch({ self, role: joined.role, room: joined.room, iceServers: this.iceServers })
+    this.patch({ self, role: joined.role, room: joined.room })
     this.publishParticipants()
 
-    if (joined.resumed && this.device && this.sendTransport && this.recvTransport) {
-      // The server kept our transports. Restart ICE on both and we are back.
-      await this.restartTransports()
+    // Same participant and a live link: the conference never noticed.
+    const sameIdentity = joined.resumed && previousSelf?.id === self.id
+    if (sameIdentity && this.link && this.snapshot.recvTransport === 'connected') {
       this.setStatus('joined')
-      await this.consumeMissing()
+      this.publishTracks()
       return
     }
-
-    // Fresh build (first join, or the server forgot us).
-    this.teardownMedia()
-    const device = this.options.createDevice?.() ?? new Device()
-    await device.load({ routerRtpCapabilities: joined.routerRtpCapabilities as unknown as msTypes.RtpCapabilities })
-    this.device = device
-
-    if (this.canProduce(joined.role)) {
-      this.sendTransport = await this.createTransport('send')
-    }
-    this.recvTransport = await this.createTransport('recv')
+    await this.connectConference(joined.media)
     this.setStatus('joined')
+  }
 
-    await this.consumeMissing()
-    for (const [source, track] of this.localTracks) {
-      if (track.readyState !== 'live') continue
-      await this.createProducer(source, track).catch((error: unknown) => this.report(error))
+  private async connectConference(grant: MediaGrant): Promise<void> {
+    this.teardownLink()
+    const link = this.options.createLink?.() ?? new JitsiLink()
+    this.link = link
+    this.linkOff = [
+      link.on('state', (state) => this.onLinkState(link, state)),
+      link.on('trackAdded', (track) => {
+        if (this.link !== link) return
+        this.remote.set(track.id, track)
+        this.publishTracks()
+      }),
+      link.on('trackRemoved', (id) => {
+        if (this.link !== link || !this.remote.delete(id)) return
+        this.publishTracks()
+      }),
+      link.on('failed', (message) => {
+        if (this.link !== link) return
+        this.report(new Error(message))
+        this.scheduleRejoin()
+      }),
+    ]
+    await withTimeout(link.join(grant), this.options.operationTimeoutMs + 10_000, 'Joining the media conference')
+    this.rejoinAttempts = 0
+    await this.syncSlots()
+  }
+
+  private onLinkState(link: MediaLink, state: TransportHealth): void {
+    if (this.link !== link) return
+    this.patch({ sendTransport: state, recvTransport: state })
+  }
+
+  private scheduleRejoin(): void {
+    if (this.closed || this.rejoinTimer || this.snapshot.status !== 'joined') return
+    if (this.rejoinAttempts >= MAX_REJOIN_ATTEMPTS) {
+      this.fail(new Error('Audio and video were lost and could not be restored. Leave and rejoin the room.'))
+      return
     }
+    const delay = this.options.rejoinDelayMs * 2 ** this.rejoinAttempts
+    this.rejoinAttempts += 1
+    this.rejoinTimer = setTimeout(() => {
+      this.rejoinTimer = null
+      void this.rejoinConference()
+    }, delay)
   }
 
-  private canProduce(role: Role): boolean {
-    return role !== 'viewer'
-  }
-
-  private async createTransport(direction: 'send' | 'recv'): Promise<msTypes.Transport> {
+  /** A new grant and a new conference link, for the same participant. */
+  private async rejoinConference(): Promise<void> {
     const signaling = this.signaling
-    const device = this.device
-    if (!signaling || !device) throw new SignalingError('internal', 'No device.')
-    const params = await withTimeout(
-      signaling.request('createWebRtcTransport', { direction }),
-      this.options.operationTimeoutMs,
-      `Creating the ${direction} transport`,
-    )
-    const transportOptions: msTypes.TransportOptions = {
-      id: params.id,
-      iceParameters: params.iceParameters as unknown as msTypes.IceParameters,
-      iceCandidates: params.iceCandidates as unknown as msTypes.IceCandidate[],
-      dtlsParameters: params.dtlsParameters as unknown as msTypes.DtlsParameters,
-      iceServers: this.iceServers.map((server) => ({ ...server })),
-    }
-    const transport =
-      direction === 'send'
-        ? device.createSendTransport(transportOptions)
-        : device.createRecvTransport(transportOptions)
-
-    transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-      signaling
-        .request('connectWebRtcTransport', {
-          transportId: transport.id,
-          dtlsParameters: dtlsParameters as unknown as Record<string, unknown>,
-        })
-        .then(() => callback(), errback)
-    })
-    if (direction === 'send') {
-      transport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
-        signaling
-          .request('produce', {
-            transportId: transport.id,
-            kind,
-            rtpParameters: rtpParameters as unknown as Record<string, unknown>,
-            source: appData.source as MediaSource,
-          })
-          .then(({ producerId }) => callback({ id: producerId }), errback)
-      })
-    }
-    transport.on('connectionstatechange', (state) => {
-      this.patch(direction === 'send' ? { sendTransport: state as TransportHealth } : { recvTransport: state as TransportHealth })
-      if (state === 'failed') void this.restartIce(transport)
-    })
-    return transport
-  }
-
-  private async restartTransports(): Promise<void> {
-    const transports = [this.sendTransport, this.recvTransport].filter(
-      (transport): transport is msTypes.Transport => Boolean(transport && !transport.closed),
-    )
-    await Promise.all(transports.map((transport) => this.restartIce(transport)))
-  }
-
-  private async restartIce(transport: msTypes.Transport): Promise<void> {
-    const signaling = this.signaling
-    if (!signaling || transport.closed || this.snapshot.status === 'closed') return
+    if (this.closed || !signaling) return
     try {
-      await transport.updateIceServers({ iceServers: this.iceServers.map((server) => ({ ...server })) })
-      const { iceParameters } = await signaling.request('restartIce', { transportId: transport.id })
-      await transport.restartIce({ iceParameters: iceParameters as unknown as msTypes.IceParameters })
+      const grant = await withTimeout(signaling.request('getMediaGrant', {}), this.options.operationTimeoutMs, 'Renewing media access')
+      await this.connectConference(grant)
     } catch (error) {
       this.report(error)
+      this.scheduleRejoin()
     }
   }
 
-  /** Serialize producer creation per source; see {@link producing}. */
-  private createProducer(source: MediaSource, track: MediaStreamTrack): Promise<void> {
-    const previous = this.producing.get(source) ?? Promise.resolve()
-    const next = previous
-      .catch(() => undefined)
-      .then(() => this.createProducerNow(source, this.localTracks.get(source) ?? track))
-    const tracked = next.finally(() => {
-      if (this.producing.get(source) === tracked) this.producing.delete(source)
-    })
-    this.producing.set(source, tracked)
-    return tracked
-  }
-
-  private async createProducerNow(source: MediaSource, track: MediaStreamTrack): Promise<void> {
-    // The source may have been closed while this waited its turn.
-    if (!this.localTracks.has(source)) return
-    const transport = this.sendTransport
-    if (!transport || transport.closed) return
-    const existing = this.producers.get(source)
-    if (existing && !existing.closed) {
-      if (existing.track !== track) await existing.replaceTrack({ track })
-      return
+  /** Push the local tracks into the link's three slots. */
+  private async syncSlots(): Promise<void> {
+    const role = this.snapshot.role
+    const sending = new Map<MediaSource, MediaStreamTrack>()
+    if (role) {
+      for (const [source, track] of this.localTracks) {
+        if (this.paused.has(source) || track.readyState !== 'live') continue
+        if (!canProduce(role, source)) continue
+        sending.set(source, track)
+      }
     }
-    const encoding = encodingFor(source)
-    applyContentHint(track, encoding.contentHint)
-    const producer = await withTimeout(
-      transport.produce({
-        track,
-        ...(track.kind === 'video' ? { encodings: encoding.encodings } : {}),
-        codecOptions: encoding.codecOptions as msTypes.ProducerCodecOptions,
-        appData: { source },
-        // Keep the track alive for the registry; the producer does not own it.
-        stopTracks: false,
-        disableTrackOnPause: true,
-      }),
-      this.options.operationTimeoutMs,
-      `Publishing ${source}`,
+    const slots: Record<SendSlot, MediaStreamTrack | null> = {
+      audio: this.audioMix.output([sending.get('mic') ?? sending.get('program-audio'), sending.get('screen-audio')]),
+      camera: sending.get('camera') ?? sending.get('program') ?? null,
+      screen: sending.get('screen') ?? null,
+    }
+    this.publishProducers(sending)
+    const link = this.link
+    if (!link) return
+    const results = await Promise.allSettled(
+      (Object.keys(slots) as SendSlot[]).map((slot) => link.setSlot(slot, slots[slot])),
     )
-    this.producers.set(source, producer)
-    producer.on('transportclose', () => {
-      if (this.producers.get(source) === producer) this.producers.delete(source)
-      this.publishProducers()
-    })
-    producer.on('trackended', () => {
-      void this.closeProducer(source)
-    })
-    this.publishProducers()
+    for (const result of results) if (result.status === 'rejected') this.report(result.reason)
   }
 
-  /* ----------------------------------------------------------- consumers */
+  /* -------------------------------------------------------- notifications */
 
-  private async consumeMissing(): Promise<void> {
-    for (const producer of this.knownProducers.values()) {
-      await this.consume(producer).catch((error: unknown) => this.report(error))
-    }
-  }
-
-  private async consume(info: ProducerInfo): Promise<void> {
-    const signaling = this.signaling
-    const device = this.device
-    const transport = this.recvTransport
-    if (!signaling || !device || !transport || transport.closed) return
-    if (this.consumers.has(info.id) || this.consuming.has(info.id)) return
-    if (info.participantId === this.snapshot.self?.id) return
-    this.consuming.add(info.id)
-    try {
-      const params = await withTimeout(
-        signaling.request('consume', {
-          producerId: info.id,
-          rtpCapabilities: device.rtpCapabilities as unknown as Record<string, unknown>,
-        }),
-        this.options.operationTimeoutMs,
-        `Receiving ${info.source}`,
-      )
-      if (this.consumers.has(info.id) || !this.knownProducers.has(info.id)) return
-      const consumer = await transport.consume({
-        id: params.consumerId,
-        producerId: params.producerId,
-        kind: params.kind,
-        rtpParameters: params.rtpParameters as unknown as msTypes.RtpParameters,
-        appData: { participantId: params.participantId, source: params.source },
-      })
-      /*
-       * The producer may have closed while the consume call was in flight:
-       * its producerClosed / consumerClosed notifications then arrived before
-       * there was a consumer to drop. Handing that consumer to the UI would
-       * show a frozen track in place of the live one.
-       */
-      if (!this.knownProducers.has(info.id) || this.closedConsumerIds.has(consumer.id)) {
-        consumer.close()
-        return
-      }
-      this.consumers.set(info.id, consumer)
-      const remote: RemoteTrack = {
-        consumerId: consumer.id,
-        producerId: params.producerId,
-        participantId: params.participantId,
-        kind: params.kind,
-        source: params.source,
-        track: consumer.track,
-        producerPaused: params.producerPaused,
-      }
-      consumer.on('transportclose', () => this.dropConsumer(info.id))
-      consumer.on('trackended', () => this.dropConsumer(info.id))
-      this.patch({ tracks: [...this.snapshot.tracks.filter((t) => t.consumerId !== remote.consumerId), remote] })
-      for (const listener of this.listeners.trackAdded) listener(remote)
-      // Created paused on the server; resume once the track is wired.
-      await signaling.request('resumeConsumer', { consumerId: consumer.id })
-    } finally {
-      this.consuming.delete(info.id)
-    }
-  }
-
-  private dropConsumer(producerId: string): void {
-    const consumer = this.consumers.get(producerId)
-    if (!consumer) return
-    this.consumers.delete(producerId)
-    const remote = this.snapshot.tracks.find((t) => t.consumerId === consumer.id)
-    if (!consumer.closed) consumer.close()
-    this.patch({ tracks: this.snapshot.tracks.filter((t) => t.consumerId !== consumer.id) })
-    if (remote) for (const listener of this.listeners.trackRemoved) listener(remote)
-  }
-
-  private dropConsumersOf(participantId: string): void {
-    for (const [producerId, consumer] of this.consumers) {
-      if (consumer.appData.participantId === participantId) this.dropConsumer(producerId)
-    }
-    for (const [id, producer] of this.knownProducers) {
-      if (producer.participantId === participantId) this.knownProducers.delete(id)
-    }
-  }
-
-  /* ------------------------------------------------------- notifications */
-
-  private handleNotification<E extends NotificationEvent>(event: E, data: NotificationData<E>): void {
+  private handleNotification(event: NotificationEvent, data: unknown): void {
     switch (event) {
-      case 'participantJoined': {
-        const { participant } = data as NotificationData<'participantJoined'>
-        this.participants.set(participant.id, participant)
-        this.publishParticipants()
-        return
-      }
+      case 'participantJoined':
       case 'participantUpdated': {
-        const { participant } = data as NotificationData<'participantUpdated'>
+        const { participant } = data as NotificationData<'participantJoined'>
         if (participant.id === this.snapshot.self?.id) {
-          this.patch({ self: participant })
+          this.patch({ self: { ...participant } })
           return
         }
         this.participants.set(participant.id, participant)
         this.publishParticipants()
+        this.publishTracks()
         return
       }
       case 'participantLeft': {
         const { participantId } = data as NotificationData<'participantLeft'>
         this.participants.delete(participantId)
-        this.dropConsumersOf(participantId)
         this.publishParticipants()
+        this.publishTracks()
         for (const listener of this.listeners.participantLeft) listener(participantId)
-        return
-      }
-      case 'newProducer': {
-        const { producer } = data as NotificationData<'newProducer'>
-        this.knownProducers.set(producer.id, producer)
-        if (this.snapshot.status === 'joined') void this.consume(producer).catch((e: unknown) => this.report(e))
-        return
-      }
-      case 'producerClosed': {
-        const { producerId } = data as NotificationData<'producerClosed'>
-        this.knownProducers.delete(producerId)
-        this.dropConsumer(producerId)
-        return
-      }
-      case 'producerPaused':
-      case 'producerResumed': {
-        const { producerId } = data as NotificationData<'producerPaused'>
-        const known = this.knownProducers.get(producerId)
-        if (known) this.knownProducers.set(producerId, { ...known, paused: event === 'producerPaused' })
-        this.patch({
-          tracks: this.snapshot.tracks.map((t) =>
-            t.producerId === producerId ? { ...t, producerPaused: event === 'producerPaused' } : t,
-          ),
-        })
-        return
-      }
-      case 'consumerClosed': {
-        const { consumerId } = data as NotificationData<'consumerClosed'>
-        const entry = [...this.consumers.entries()].find(([, c]) => c.id === consumerId)
-        if (entry) this.dropConsumer(entry[0])
-        else this.closedConsumerIds.add(consumerId)
-        return
-      }
-      case 'consumerPaused':
-      case 'consumerResumed': {
-        const { consumerId } = data as NotificationData<'consumerPaused'>
-        this.patch({
-          tracks: this.snapshot.tracks.map((t) =>
-            t.consumerId === consumerId ? { ...t, producerPaused: event === 'consumerPaused' } : t,
-          ),
-        })
         return
       }
       case 'control': {
@@ -690,33 +465,65 @@ export class MediaSession {
     }
   }
 
-  private teardownMedia(): void {
-    for (const producer of this.producers.values()) producer.close()
-    this.producers.clear()
-    for (const consumer of this.consumers.values()) consumer.close()
-    const removed = this.snapshot.tracks
-    this.consumers.clear()
-    this.consuming.clear()
-    this.sendTransport?.close()
-    this.recvTransport?.close()
-    this.sendTransport = null
-    this.recvTransport = null
-    this.device = null
-    this.patch({ tracks: [], producers: [], sendTransport: 'new', recvTransport: 'new' })
-    for (const track of removed) for (const listener of this.listeners.trackRemoved) listener(track)
+  private teardownLink(): void {
+    for (const off of this.linkOff) off()
+    this.linkOff = []
+    const link = this.link
+    this.link = null
+    if (link) void link.leave().catch(() => undefined)
+    this.remote.clear()
+    this.publishTracks()
+    this.patch({ sendTransport: 'new', recvTransport: 'new' })
   }
 
   /* ------------------------------------------------------------ snapshot */
+
+  /**
+   * The remote tracks the studio may use: owned by someone the server lists,
+   * whose role may publish that source, and not this participant's own.
+   */
+  private publishTracks(): void {
+    const selfId = this.snapshot.self?.id ?? null
+    const visible: RemoteTrack[] = []
+    for (const track of this.remote.values()) {
+      if (!track.ownerId || track.ownerId === selfId) continue
+      const owner = this.participants.get(track.ownerId)
+      if (!owner || !canProduce(owner.role, track.source)) continue
+      visible.push({
+        consumerId: track.id,
+        producerId: track.id,
+        participantId: track.ownerId,
+        kind: track.kind,
+        source: track.source,
+        track: track.track,
+        producerPaused: false,
+      })
+    }
+    const before = new Map(this.snapshot.tracks.map((track) => [track.consumerId, track]))
+    const after = new Map(visible.map((track) => [track.consumerId, track]))
+    if (before.size === after.size && [...after.keys()].every((id) => before.has(id))) return
+    this.patch({ tracks: visible })
+    for (const [id, track] of before) {
+      if (!after.has(id)) for (const listener of this.listeners.trackRemoved) listener(track)
+    }
+    for (const [id, track] of after) {
+      if (!before.has(id)) for (const listener of this.listeners.trackAdded) listener(track)
+    }
+  }
 
   private publishParticipants(): void {
     this.patch({ participants: [...this.participants.values()].sort((a, b) => a.joinedAt - b.joinedAt) })
   }
 
-  private publishProducers(): void {
+  private publishProducers(sending: Map<MediaSource, MediaStreamTrack>): void {
     const producers: LocalProducerInfo[] = []
-    for (const [source, producer] of this.producers) {
-      if (producer.closed) continue
-      producers.push({ producerId: producer.id, source, kind: producer.kind, paused: producer.paused })
+    for (const [source, track] of this.localTracks) {
+      producers.push({
+        producerId: source,
+        source,
+        kind: track.kind === 'audio' ? 'audio' : 'video',
+        paused: !sending.has(source),
+      })
     }
     this.patch({ producers })
   }

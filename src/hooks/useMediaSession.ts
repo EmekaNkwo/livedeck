@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
-import type { ControlAction, IceServer, MediaSource } from '@shared/protocol'
+import { useCallback, useEffect, useRef } from 'react'
+import type { ControlAction, MediaSource } from '@shared/protocol'
 import { MediaSession } from '@/media/media-session'
 import { QualityController } from '@/media/quality-controller'
 import { useMediaSessionStore } from '@/media/session-store'
 import { useGuestStore } from '@/stores/guestStore'
 import type { JoinOptions, SessionSnapshot } from '@/media/types'
-import { parseIceServerUrls } from '@/services/signaling/ice-servers'
 import { resolveRelayUrl } from '@/services/signaling/relay-url'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useStudioStore } from '@/stores/studioStore'
@@ -38,16 +37,12 @@ export type UseMediaSession = {
 
 export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSession {
   const serverUrl = useSettingsStore((state) => state.settings.signalingServerUrl)
-  const iceServerUrls = useSettingsStore((state) => state.settings.iceServerUrls)
   const showToast = useStudioStore((state) => state.showToast)
   const snapshot = useMediaSessionStore((state) => state.snapshot)
   const attach = useMediaSessionStore((state) => state.attach)
   const setQuality = useMediaSessionStore((state) => state.setQuality)
   const sessionRef = useRef<MediaSession | null>(null)
 
-  const extraIceServers = useMemo<IceServer[]>(() => parseIceServerUrls(iceServerUrls), [iceServerUrls])
-  const extraIceServersRef = useRef(extraIceServers)
-  extraIceServersRef.current = extraIceServers
   const showToastRef = useRef(showToast)
   showToastRef.current = showToast
 
@@ -61,7 +56,7 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
 
   useEffect(() => {
     if (!room) return
-    const session = new MediaSession({ url, extraIceServers: extraIceServersRef.current })
+    const session = new MediaSession({ url })
     sessionRef.current = session
     // A handle for the browser test suite, which drives the session directly
     // to prove the server refuses what the UI never offers.
@@ -99,11 +94,20 @@ export function useMediaSession({ join }: UseMediaSessionOptions): UseMediaSessi
     }
     window.addEventListener('online', onWake)
     document.addEventListener('visibilitychange', onWake)
+    /*
+     * Closing or reloading the tab is a deliberate leave. Leaving cleanly
+     * lets the server remove the participant at once; otherwise the dropped
+     * socket is held for a resume that never comes, and the reloaded page
+     * joins beside its own ghost.
+     */
+    const onPageHide = () => session.leave()
+    window.addEventListener('pagehide', onPageHide)
 
     return () => {
       clearTimeout(startTimer)
       window.removeEventListener('online', onWake)
       document.removeEventListener('visibilitychange', onWake)
+      window.removeEventListener('pagehide', onPageHide)
       quality.stop()
       offError()
       session.leave()

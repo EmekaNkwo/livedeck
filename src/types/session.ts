@@ -36,13 +36,6 @@ export type StudioSettings = {
   /** Route mixer output to local speakers. Off by default (feedback risk). */
   monitorProgramAudio: boolean
   /**
-   * Extra ICE servers, merged after the ones the media server issues.
-   *
-   * One URL per entry; TURN credentials as `turn:host:port|username:password`.
-   * Normally empty: the server hands out its own STUN and per-session TURN.
-   */
-  iceServerUrls: string[]
-  /**
    * Base URL of the media server.
    *
    * Blank means "work it out" — see `services/signaling/relay-url.ts`. Left
@@ -60,7 +53,6 @@ export const DEFAULT_SETTINGS: StudioSettings = {
   reducedMotion: 'system',
   previewFrameRate: 30,
   monitorProgramAudio: false,
-  iceServerUrls: [],
   signalingServerUrl: '',
 }
 

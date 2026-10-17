@@ -13,11 +13,9 @@ import {
   type RequestParams,
   type ResponseResult,
 } from '../../../shared/protocol'
-import type { MediasoupConfig } from '../mediasoup/config'
-import type { WorkerPool } from '../mediasoup/worker-pool'
 import { createRoomManager, type RoomManager } from '../rooms/room-manager'
 import { DEFAULT_RATE_LIMITS } from '../security/rate-limit'
-import { audioRtpParameters, createTestPool, quietLog } from '../test/fixtures'
+import { decodeJwt, quietLog, testGrants } from '../test/fixtures'
 import { createKeyService } from './authorization'
 import { attachSignaling, type SignalingOptions, type SignalingServer } from './server'
 
@@ -105,8 +103,6 @@ class TestClient {
   }
 }
 
-let pool: WorkerPool
-let config: MediasoupConfig
 let httpServer: Server
 let signaling: SignalingServer
 let rooms: RoomManager
@@ -115,9 +111,9 @@ const keys = createKeyService('test-secret-that-is-long-enough')
 const clients: TestClient[] = []
 
 async function startServer(overrides: Partial<SignalingOptions> = {}): Promise<void> {
-  rooms = createRoomManager({ pool, config, log: quietLog, limits: { maxPeersPerRoom: 3 } })
+  rooms = createRoomManager({ log: quietLog, limits: { maxPeersPerRoom: 3 } })
   httpServer = createServer((_req, res) => res.end())
-  signaling = attachSignaling(httpServer, { rooms, keys, turn: null, log: quietLog, resumeGraceMs: 1500, ...overrides })
+  signaling = attachSignaling(httpServer, { rooms, keys, grants: testGrants(), log: quietLog, resumeGraceMs: 1500, ...overrides })
   await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve))
   port = (httpServer.address() as AddressInfo).port
 }
@@ -141,12 +137,10 @@ async function joinAs(label: string, key?: string, room = 'studio'): Promise<{ c
 }
 
 beforeAll(async () => {
-  ;({ pool, config } = await createTestPool())
   await startServer()
 })
 afterAll(async () => {
   await stopServer()
-  await pool.close()
 })
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()))
@@ -163,8 +157,7 @@ describe('joining', () => {
     expect(joined.role).toBe('guest')
     expect(joined.participantId).toMatch(/^[0-9a-f-]{36}$/)
     expect(joined.resumeToken.length).toBeGreaterThan(20)
-    expect(joined.iceServers.length).toBeGreaterThan(0)
-    expect(joined.routerRtpCapabilities).toHaveProperty('codecs')
+    expect(joined.media.room).toBe('livedeck-studio')
     expect(joined.resumed).toBe(false)
   })
 
@@ -212,9 +205,10 @@ describe('joining', () => {
     await expect(client.request('getRoomKeys', {})).resolves.toEqual(keys.keysFor('studio'))
   })
 
-  it('refuses media requests before joining and double joins after', async () => {
+  it('refuses requests before joining and double joins after', async () => {
     const client = await connect()
-    await client.expectError('createWebRtcTransport', { direction: 'send' }, 'not-joined')
+    await client.expectError('getMediaGrant', {}, 'not-joined')
+    await client.expectError('updateState', { micMuted: true }, 'not-joined')
     await client.request('join', { room: 'studio', label: 'A' })
     await client.expectError('join', { room: 'studio', label: 'A' }, 'already-joined')
   })
@@ -293,86 +287,91 @@ describe('authorization end to end', () => {
     await dir.waitFor('participantLeft')
   })
 
-  it('a viewer cannot open a send transport or publish', async () => {
-    const viewer = await connect()
-    await viewer.request('join', { room: 'studio', label: 'V', role: 'viewer' })
-    await viewer.expectError('createWebRtcTransport', { direction: 'send' }, 'forbidden')
-    await viewer.request('createWebRtcTransport', { direction: 'recv' })
-  })
-
-  it('a guest cannot publish the program feed', async () => {
-    const { client: g } = await joinAs('G')
-    const transport = await g.request('createWebRtcTransport', { direction: 'send' })
-    await g.expectError(
-      'produce',
-      { transportId: transport.id, kind: 'audio', rtpParameters: audioRtpParameters(1), source: 'program-audio' },
-      'forbidden',
-    )
-  })
 })
 
-describe('media over signaling', () => {
-  it('publishes, notifies, consumes and updates state', async () => {
-    const { client: a } = await joinAs('A')
-    const { client: b } = await joinAs('B')
-    const send = await a.request('createWebRtcTransport', { direction: 'send' })
-    const { producerId } = await a.request('produce', {
-      transportId: send.id,
-      kind: 'audio',
-      rtpParameters: audioRtpParameters(5001),
-      source: 'mic',
+describe('media grants', () => {
+  it('names the participant, this room\'s conference, and expires within the hour', async () => {
+    const { joined } = await joinAs('Ada')
+    const { header, payload } = decodeJwt(joined.media.jwt)
+    expect(header).toMatchObject({ alg: 'HS256', typ: 'JWT' })
+    expect(payload).toMatchObject({
+      aud: 'jitsi',
+      iss: 'livedeck',
+      sub: 'meet.jitsi',
+      room: 'livedeck-studio',
+      context: { user: { id: joined.participantId, name: 'Ada', moderator: 'false' } },
     })
-    const announced = await b.waitFor('newProducer')
-    expect(announced.data).toMatchObject({ producer: { id: producerId, source: 'mic' } })
-
-    await b.request('createWebRtcTransport', { direction: 'recv' })
-    const consumed = await b.request('consume', { producerId, rtpCapabilities: config.mediaCodecs ? (await a.request('getRouterRtpCapabilities', {})).rtpCapabilities : {} })
-    expect(consumed.producerId).toBe(producerId)
-    await b.request('resumeConsumer', { consumerId: consumed.consumerId })
-
-    await a.request('updateState', { micMuted: true })
-    await b.waitFor('participantUpdated', (n) => (n.data as { participant: { micMuted: boolean } }).participant.micMuted)
-
-    await a.request('closeProducer', { producerId })
-    await b.waitFor('producerClosed')
-    await b.waitFor('consumerClosed')
+    const lifetime = (payload.exp as number) - Math.floor(Date.now() / 1000)
+    expect(lifetime).toBeGreaterThan(3500)
+    expect(lifetime).toBeLessThanOrEqual(3600)
+    expect(joined.media).toMatchObject({
+      provider: 'jitsi',
+      domain: 'meet.jitsi',
+      mucDomain: 'muc.meet.jitsi',
+      libraryUrl: 'https://jitsi.test/libs/lib-jitsi-meet.min.js',
+      serviceUrl: 'wss://jitsi.test/xmpp-websocket?room=livedeck-studio',
+    })
   })
 
-  it('late joiners receive the current producer list', async () => {
-    const { client: a } = await joinAs('A')
-    const send = await a.request('createWebRtcTransport', { direction: 'send' })
-    const { producerId } = await a.request('produce', { transportId: send.id, kind: 'audio', rtpParameters: audioRtpParameters(5002), source: 'mic' })
-    const { joined } = await joinAs('B')
-    expect(joined.producers.map((p) => p.id)).toEqual([producerId])
+  it('makes only the director a Jitsi moderator', async () => {
+    const { directorKey, producerKey } = keys.keysFor('studio')
+    const moderatorOf = (jwt: string) => (decodeJwt(jwt).payload.context as { user: { moderator: string } }).user.moderator
+    const { joined: director } = await joinAs('Dir', directorKey)
+    const { joined: producer } = await joinAs('Prod', producerKey)
+    const viewer = await connect()
+    const viewerJoined = await viewer.request('join', { room: 'studio', label: 'V', role: 'viewer' })
+    expect(moderatorOf(director.media.jwt)).toBe('true')
+    expect(moderatorOf(producer.media.jwt)).toBe('false')
+    expect(moderatorOf(viewerJoined.media.jwt)).toBe('false')
   })
 
-  it('a screen producer flips the sharing flag', async () => {
+  it('a token for one room does not name another', async () => {
+    const { joined: a } = await joinAs('A', undefined, 'alpha')
+    const { joined: b } = await joinAs('B', undefined, 'beta')
+    expect(decodeJwt(a.media.jwt).payload.room).toBe('livedeck-alpha')
+    expect(decodeJwt(b.media.jwt).payload.room).toBe('livedeck-beta')
+  })
+
+  it('issues a fresh grant on request, for the same participant', async () => {
+    const { client, joined } = await joinAs('A')
+    const fresh = await client.request('getMediaGrant', {})
+    expect(fresh.room).toBe(joined.media.room)
+    expect(decodeJwt(fresh.jwt).payload.context).toMatchObject({ user: { id: joined.participantId } })
+  })
+
+  it('refuses joins when the server has no media backend', async () => {
+    await stopServer()
+    await startServer({ grants: null })
+    const client = await connect()
+    await client.expectError('join', { room: 'studio', label: 'A' }, 'media-error')
+    expect(rooms.stats().peers).toBe(0)
+    await stopServer()
+    await startServer()
+  })
+
+  it('broadcasts each participant\'s reported state', async () => {
     const { client: a } = await joinAs('A')
     const { client: b } = await joinAs('B')
-    const send = await a.request('createWebRtcTransport', { direction: 'send' })
-    const { producerId } = await a.request('produce', { transportId: send.id, kind: 'video', rtpParameters: { ...audioRtpParameters(1), codecs: [{ mimeType: 'video/VP8', payloadType: 96, clockRate: 90000, parameters: {}, rtcpFeedback: [] }], encodings: [{ ssrc: 7001 }] }, source: 'screen' })
-    await b.waitFor('participantUpdated', (n) => (n.data as { participant: { sharing: boolean } }).participant.sharing)
-    await a.request('closeProducer', { producerId })
-    await b.waitFor('participantUpdated', (n) => !(n.data as { participant: { sharing: boolean } }).participant.sharing)
+    await a.request('updateState', { micMuted: true, sharing: true })
+    await b.waitFor('participantUpdated', (n) => {
+      const participant = (n.data as { participant: { micMuted: boolean; sharing: boolean } }).participant
+      return participant.micMuted && participant.sharing
+    })
   })
 })
 
 describe('reconnection', () => {
-  it('resumes a dropped session with the same identity and media', async () => {
+  it('resumes a dropped session with the same identity and a fresh grant', async () => {
     const { client: a, joined } = await joinAs('A')
     const { client: b } = await joinAs('B')
-    const send = await a.request('createWebRtcTransport', { direction: 'send' })
-    const { producerId } = await a.request('produce', { transportId: send.id, kind: 'audio', rtpParameters: audioRtpParameters(6001), source: 'mic' })
 
     a.terminate()
     const resumedClient = await connect()
     const resumed = await resumedClient.request('join', { room: 'studio', label: 'A', resumeToken: joined.resumeToken })
     expect(resumed.resumed).toBe(true)
     expect(resumed.participantId).toBe(joined.participantId)
-    expect(resumed.producers.map((p) => p.id)).toEqual([producerId])
     expect(resumed.resumeToken).not.toBe(joined.resumeToken)
-    // The restarted transport is still there to restart ICE on.
-    await resumedClient.request('restartIce', { transportId: send.id })
+    expect(decodeJwt(resumed.media.jwt).payload.context).toMatchObject({ user: { id: joined.participantId } })
     expect(b.has('participantLeft')).toBe(false)
     expect(b.notifications.filter((n) => n.event === 'participantJoined')).toHaveLength(0)
   })

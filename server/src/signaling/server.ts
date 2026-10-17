@@ -11,7 +11,7 @@ import {
   type NotificationData,
   type NotificationEvent,
 } from '../../../shared/protocol'
-import { RoomError } from '../mediasoup/room'
+import { RoomError } from '../rooms/room'
 import type { RoomManager } from '../rooms/room-manager'
 import {
   clientAddress,
@@ -19,7 +19,7 @@ import {
   type ConnectionLimits,
 } from '../security/connection-limit'
 import { METHOD_CATEGORY, createRateLimiter, type RateLimits } from '../security/rate-limit'
-import type { TurnProvider } from '../turn/credentials'
+import type { GrantIssuer } from '../jitsi/grants'
 import type { KeyService } from './authorization'
 import { dispatch, onSessionClosed, type HandlerContext, type Session } from './handlers'
 
@@ -43,7 +43,7 @@ export type SignalingOptions = {
   connectionLimits?: ConnectionLimits
   rooms: RoomManager
   keys: KeyService
-  turn: TurnProvider | null
+  grants: GrantIssuer | null
   log?: (event: string, detail?: Record<string, unknown>) => void
   /** How long a dropped participant's media survives awaiting a resume. */
   resumeGraceMs?: number
@@ -126,7 +126,7 @@ export function attachSignaling(httpServer: Server, options: SignalingOptions): 
       session,
       rooms: options.rooms,
       keys: options.keys,
-      turn: options.turn,
+      grants: options.grants,
       log,
       resumeGraceMs: options.resumeGraceMs,
     }

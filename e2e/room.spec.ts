@@ -79,6 +79,9 @@ test.describe('Scenario E: room-based joining', () => {
       // Joining switches nothing on, so the camera is turned on in the lobby:
       // the assertion at the end is about one guest *video* source.
       const joinAs = async (name: string) => {
+        // The lobby must be up before its camera state can be read; checking
+        // the button any earlier finds nothing and silently skips the click.
+        await expect(guest.getByLabel('Your name')).toBeVisible()
         const cameraOn = guest.getByRole('button', { name: 'Turn camera on' })
         if (await cameraOn.isVisible()) await cameraOn.click()
         await guest.getByLabel('Your name').fill(name)

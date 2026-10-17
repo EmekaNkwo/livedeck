@@ -32,7 +32,7 @@ export type PeerState = {
   hasRemoteVideo: boolean
   hasRemoteAudio: boolean
   connectedAt: number | null
-  /** Health of this studio's receive transport to the SFU. */
+  /** Health of this studio's connection to the media conference. */
   transport: TransportHealth
 }
 

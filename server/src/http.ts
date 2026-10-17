@@ -32,7 +32,7 @@ const LANDING_PAGE = `<!doctype html>
     <li>Signaling: <code>/signal</code> (WebSocket)</li>
     <li>Health: <code>/healthz</code></li>
   </ul>
-  <p>Media is forwarded by an SFU in this process and never recorded here. Rooms live in memory.</p>
+  <p>Audio and video travel through Jitsi; this server admits each participant to their room's conference and never sees the media. Rooms live in memory.</p>
   <p class="warn">A room name is not a credential. Director and producer roles are granted by room keys the server issues.</p>
 </main>
 </body>

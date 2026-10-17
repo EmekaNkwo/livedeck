@@ -1,11 +1,20 @@
 import { z } from 'zod'
 
 /**
- * The signaling protocol between the studio and the SFU server.
+ * The signaling protocol between the studio and the LiveDeck server.
  *
  * One definition, consumed by both halves, so the two cannot drift. Every
  * inbound message is validated on both ends: the server does not trust
  * browsers, and browsers do not trust the server.
+ *
+ * WHAT TRAVELS HERE, AND WHAT DOES NOT
+ * ------------------------------------
+ * Audio and video travel through Jitsi (JaaS in production). This protocol
+ * carries everything Jitsi must not decide: who is in the room, which role
+ * each participant has, director commands and their authorization, and room
+ * keys. The join response hands each participant a short-lived Jitsi token
+ * the server signed, naming them and their role, so the media side cannot be
+ * joined without passing through here first.
  *
  * SHAPE
  * -----
@@ -14,10 +23,6 @@ import { z } from 'zod'
  *   request       client → server, carries an `id` the response echoes
  *   response      server → client, `ok` with a result or an error
  *   notification  server → client, unsolicited room events
- *
- * Every media operation is a request. Room events (someone joined, a producer
- * appeared) are notifications. The client never has to guess what a server
- * message is answering.
  *
  * IDENTITY
  * --------
@@ -28,14 +33,14 @@ import { z } from 'zod'
  * key on join, and the keys are issued by the server.
  */
 
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 /** Largest frame accepted, in bytes. Enforced by the WebSocket server too. */
 export const MAX_MESSAGE_BYTES = 256 * 1024
 export const MAX_ROOM_LENGTH = 40
 export const MAX_LABEL_LENGTH = 60
 export const MAX_CUE_LENGTH = 280
-/** Server-issued ids: UUIDs and mediasoup ids, never longer than this. */
+/** Server-issued ids (UUIDs), never longer than this. */
 const MAX_ID_LENGTH = 64
 const MAX_KEY_LENGTH = 128
 
@@ -64,17 +69,6 @@ export function isValidRoom(value: unknown): value is string {
 const IdSchema = z.string().min(1).max(MAX_ID_LENGTH)
 const LabelSchema = z.string().max(MAX_LABEL_LENGTH)
 
-/**
- * mediasoup parameter blobs.
- *
- * These are validated structurally for being objects of a bounded size, not
- * field by field: mediasoup itself validates them exhaustively and throws, and
- * duplicating its schema here would drift from the version installed. The
- * frame-size limit bounds the cost of a hostile blob before it reaches
- * mediasoup.
- */
-const OpaqueParamsSchema = z.record(z.string(), z.unknown())
-
 export const MediaSourceSchema = z.enum([
   'mic',
   'camera',
@@ -87,9 +81,6 @@ export type MediaSource = z.infer<typeof MediaSourceSchema>
 
 export const MediaKindSchema = z.enum(['audio', 'video'])
 export type MediaKind = z.infer<typeof MediaKindSchema>
-
-export const TransportDirectionSchema = z.enum(['send', 'recv'])
-export type TransportDirection = z.infer<typeof TransportDirectionSchema>
 
 /* -------------------------------------------------------------- participant */
 
@@ -105,15 +96,6 @@ export const ParticipantSchema = z.object({
   joinedAt: z.number(),
 })
 export type Participant = z.infer<typeof ParticipantSchema>
-
-export const ProducerInfoSchema = z.object({
-  id: IdSchema,
-  participantId: IdSchema,
-  kind: MediaKindSchema,
-  source: MediaSourceSchema,
-  paused: z.boolean(),
-})
-export type ProducerInfo = z.infer<typeof ProducerInfoSchema>
 
 export const IceServerSchema = z.object({
   urls: z.array(z.string().max(512)).min(1),
@@ -155,48 +137,19 @@ export const RequestSchemas = {
     /**
      * Claim an empty room as its director.
      *
-     * There are no accounts, so the first studio to open a room that nobody
-     * is in becomes its director and is handed the room keys. Once a room has
-     * participants, only a key grants the role.
+     * There are no accounts, so the first studio to claim a room becomes its
+     * director and is handed the room keys, even if guests opened the link
+     * first. Once a room is claimed, only a key grants the role.
      */
     claim: z.boolean().optional(),
     /**
      * Resume a previous session after a dropped socket. The server reclaims
-     * the same participant and its transports if they are still alive.
+     * the same participant, and its id, if it is still held.
      */
     resumeToken: z.string().max(MAX_KEY_LENGTH).optional(),
   }),
-  getRouterRtpCapabilities: z.object({}),
-  createWebRtcTransport: z.object({
-    direction: TransportDirectionSchema,
-  }),
-  connectWebRtcTransport: z.object({
-    transportId: IdSchema,
-    dtlsParameters: OpaqueParamsSchema,
-  }),
-  restartIce: z.object({ transportId: IdSchema }),
-  produce: z.object({
-    transportId: IdSchema,
-    kind: MediaKindSchema,
-    rtpParameters: OpaqueParamsSchema,
-    source: MediaSourceSchema,
-  }),
-  consume: z.object({
-    producerId: IdSchema,
-    rtpCapabilities: OpaqueParamsSchema,
-  }),
-  resumeConsumer: z.object({ consumerId: IdSchema }),
-  pauseConsumer: z.object({ consumerId: IdSchema }),
-  closeConsumer: z.object({ consumerId: IdSchema }),
-  /** Ask the SFU for a particular simulcast layer of a video consumer. */
-  setConsumerLayers: z.object({
-    consumerId: IdSchema,
-    spatialLayer: z.number().int().min(0).max(2),
-    temporalLayer: z.number().int().min(0).max(2).optional(),
-  }),
-  pauseProducer: z.object({ producerId: IdSchema }),
-  resumeProducer: z.object({ producerId: IdSchema }),
-  closeProducer: z.object({ producerId: IdSchema }),
+  /** A fresh media grant, before the current one expires or after a drop. */
+  getMediaGrant: z.object({}),
   /** Report own track state; broadcast to the room. */
   updateState: z.object({
     micMuted: z.boolean().optional(),
@@ -220,47 +173,43 @@ export type RequestParams<M extends RequestMethod> = z.infer<(typeof RequestSche
 
 /* ------------------------------------------------------------- responses */
 
+/**
+ * Permission to join this room's Jitsi conference.
+ *
+ * `jwt` is signed by the server and names the participant (their LiveDeck id
+ * and label) and whether they moderate; it is valid for this conference only
+ * and expires at `expiresAt`. `libraryUrl` is lib-jitsi-meet as served by the
+ * same deployment, so the client library always matches the backend.
+ */
+export const MediaGrantSchema = z.object({
+  provider: z.enum(['jaas', 'jitsi']),
+  /** XMPP domain: 8x8.vc for JaaS, the deployment's own for self-hosted. */
+  domain: z.string().min(1).max(253),
+  /** JaaS app id (vpaas-magic-cookie-…); empty for self-hosted. */
+  appId: z.string().max(128),
+  /** The Jitsi conference name for this room. */
+  room: z.string().min(1).max(128),
+  jwt: z.string().min(1).max(8192),
+  expiresAt: z.number(),
+  libraryUrl: z.string().url().max(512),
+  /** Self-hosted only: XMPP over WebSocket, and the conference domain. */
+  serviceUrl: z.string().max(512).optional(),
+  mucDomain: z.string().max(253).optional(),
+})
+export type MediaGrant = z.infer<typeof MediaGrantSchema>
+
 export const ResponseSchemas = {
   join: z.object({
     participantId: IdSchema,
     role: RoleSchema,
     room: RoomNameSchema,
     resumeToken: z.string().max(MAX_KEY_LENGTH),
-    /** True when a previous session was reclaimed and transports survived. */
+    /** True when a previous session was reclaimed. */
     resumed: z.boolean(),
     participants: z.array(ParticipantSchema),
-    producers: z.array(ProducerInfoSchema),
-    /** Short-lived, issued for this session only. */
-    iceServers: z.array(IceServerSchema),
-    routerRtpCapabilities: OpaqueParamsSchema,
+    media: MediaGrantSchema,
   }),
-  getRouterRtpCapabilities: z.object({ rtpCapabilities: OpaqueParamsSchema }),
-  createWebRtcTransport: z.object({
-    id: IdSchema,
-    iceParameters: OpaqueParamsSchema,
-    iceCandidates: z.array(OpaqueParamsSchema),
-    dtlsParameters: OpaqueParamsSchema,
-    sctpParameters: OpaqueParamsSchema.optional(),
-  }),
-  connectWebRtcTransport: z.object({}),
-  restartIce: z.object({ iceParameters: OpaqueParamsSchema }),
-  produce: z.object({ producerId: IdSchema }),
-  consume: z.object({
-    consumerId: IdSchema,
-    producerId: IdSchema,
-    participantId: IdSchema,
-    kind: MediaKindSchema,
-    source: MediaSourceSchema,
-    rtpParameters: OpaqueParamsSchema,
-    producerPaused: z.boolean(),
-  }),
-  resumeConsumer: z.object({}),
-  pauseConsumer: z.object({}),
-  closeConsumer: z.object({}),
-  setConsumerLayers: z.object({}),
-  pauseProducer: z.object({}),
-  resumeProducer: z.object({}),
-  closeProducer: z.object({}),
+  getMediaGrant: MediaGrantSchema,
   updateState: z.object({}),
   control: z.object({}),
   getRoomKeys: z.object({
@@ -279,13 +228,6 @@ export const NotificationSchemas = {
   participantJoined: z.object({ participant: ParticipantSchema }),
   participantLeft: z.object({ participantId: IdSchema }),
   participantUpdated: z.object({ participant: ParticipantSchema }),
-  newProducer: z.object({ producer: ProducerInfoSchema }),
-  producerPaused: z.object({ producerId: IdSchema }),
-  producerResumed: z.object({ producerId: IdSchema }),
-  producerClosed: z.object({ producerId: IdSchema, participantId: IdSchema }),
-  consumerClosed: z.object({ consumerId: IdSchema }),
-  consumerPaused: z.object({ consumerId: IdSchema }),
-  consumerResumed: z.object({ consumerId: IdSchema }),
   /** A control command addressed to this participant, already authorized. */
   control: z.object({ from: IdSchema, command: ControlActionSchema }),
   /** The server is closing this session; `code` says why. */
@@ -311,9 +253,6 @@ export const ERROR_CODES = [
   'server-full',
   'forbidden',
   'unknown-participant',
-  'unknown-transport',
-  'unknown-producer',
-  'unknown-consumer',
   'rate-limited',
   'protocol-version',
   'media-error',
@@ -487,13 +426,10 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   'server-full': 'The server is at capacity. Try again shortly.',
   forbidden: 'You are not allowed to do that.',
   'unknown-participant': 'That participant is no longer in the room.',
-  'unknown-transport': 'That transport no longer exists.',
-  'unknown-producer': 'That media stream no longer exists.',
-  'unknown-consumer': 'That media stream no longer exists.',
   'rate-limited': 'Too many requests. Slow down and retry.',
   'protocol-version':
     'This build speaks a different signaling protocol than the server. Reload to pick up the current version.',
-  'media-error': 'The media server could not complete that operation.',
+  'media-error': 'Audio and video are not available from this server right now.',
   timeout: 'The server did not answer in time.',
   internal: 'The server hit an unexpected error.',
 }

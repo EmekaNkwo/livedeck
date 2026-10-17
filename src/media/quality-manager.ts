@@ -3,12 +3,12 @@ import type { PeerStats } from '@/types/peer'
 /**
  * Stats-driven quality adaptation.
  *
- * Samples the transports every couple of seconds and turns the numbers into
+ * Samples the connection every couple of seconds and turns the numbers into
  * two decisions:
  *
- *   downlink tier   which simulcast layer to ask the SFU for on every remote
- *                   video (2 = full, 1 = half, 0 = quarter)
- *   uplink tier     how many layers this participant's camera sends
+ *   downlink tier   the largest height to ask the bridge for on every remote
+ *                   video (2 = 720p, 1 = 360p, 0 = 180p)
+ *   uplink tier     the largest height this participant's camera sends
  *
  * The decision logic is pure ({@link decideTier}) so it is testable without a
  * browser. Hysteresis is explicit: a tier drops after a few consecutive bad

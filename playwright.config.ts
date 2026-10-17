@@ -32,8 +32,9 @@ export default defineConfig({
 
   use: {
     baseURL: DEPLOYED_BASE_URL ?? 'http://localhost:5173',
-    // A local trial deployment serves a certificate from Caddy's own CA.
-    ignoreHTTPSErrors: DEPLOYED_BASE_URL !== null,
+    // The local Jitsi (and a local trial deployment) serve self-signed
+    // certificates. This is the test browser only.
+    ignoreHTTPSErrors: true,
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -84,7 +85,15 @@ export default defineConfig({
       // instead of being mistaken for the server — which otherwise surfaces
       // as a WebSocket that connects and then never upgrades.
       url: `http://localhost:${RELAY_PORT}/healthz`,
-      env: { PORT: RELAY_PORT },
+      // Media through the local Jitsi: deploy/jitsi-local/jitsi-local.sh up.
+      // Its JWT secret exists only on this machine's test stack.
+      env: {
+        PORT: RELAY_PORT,
+        JITSI_PUBLIC_URL: process.env.JITSI_PUBLIC_URL ?? 'https://localhost:8443',
+        JITSI_DOMAIN: 'meet.jitsi',
+        JITSI_APP_ID: 'livedeck',
+        JITSI_APP_SECRET: process.env.JITSI_APP_SECRET ?? 'livedeck-local-jitsi-secret-0123456789',
+      },
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
       stdout: 'ignore',

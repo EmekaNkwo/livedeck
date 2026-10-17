@@ -1,5 +1,5 @@
 import { expect, test, type Page } from './test'
-import { HEALTH_URL, RELAY_URL } from './fixtures'
+import { RELAY_URL } from './fixtures'
 
 /**
  * The media server's guarantees, checked over the wire.
@@ -9,6 +9,9 @@ import { HEALTH_URL, RELAY_URL } from './fixtures'
  * directly, as a hostile client would. That is what makes them meaningful
  * against a deployment, where the studio is a production build with no test
  * hooks, and it runs the same way against the local dev servers.
+ *
+ * Media itself (Jitsi) is exercised by the studio specs; here it is the
+ * grant that admits a participant to it.
  *
  *   LIVEDECK_BASE_URL=https://studio.example.com npx playwright test e2e/deployment.spec.ts
  */
@@ -61,7 +64,7 @@ async function overTheWire<T>(page: Page, script: string): Promise<T> {
                 new Promise<WireResult>((done) => {
                   const id = nextId++
                   pending.set(id, done)
-                  socket.send(JSON.stringify({ v: 2, kind: 'request', id, method, params }))
+                  socket.send(JSON.stringify({ v: 3, kind: 'request', id, method, params }))
                 }),
             }),
           )
@@ -141,39 +144,25 @@ test.describe('media server, over the wire', () => {
     expect(code).toBe(1009)
   })
 
-  test('issues short-lived TURN credentials that the relay accepts', async ({ page }) => {
-    const health = (await (await page.request.get(HEALTH_URL)).json()) as { turn: string }
-    test.skip(health.turn === 'none', 'This server has no TURN relay configured.')
-
-    const outcome = await overTheWire<{ ttlSeconds: number; urls: string[]; relayCandidates: number }>(
+  test('grants media access for one room, naming the participant, for at most an hour', async ({ page }) => {
+    const room = `wire-grant-${Date.now()}`
+    const outcome = await overTheWire<{ id: string; grantRoom: string; payload: Record<string, unknown>; fresh: string }>(
       page,
       `
-      const client = await connect('turn')
-      const joined = await client.request('join', { room: 'wire-turn-' + Date.now(), label: 'Probe', claim: true })
-      const turn = joined.result.iceServers.filter((s) => s.urls.some((u) => /^turns?:/.test(u)))
+      const client = await connect('grant')
+      const joined = await client.request('join', { room: ${JSON.stringify(room)}, label: 'Probe' })
+      const fresh = await client.request('getMediaGrant', {})
       client.socket.close(1000)
-      const expiry = Number(String(turn[0]?.username ?? '').split(':')[0])
-      // Gather candidates through the relay only: a relay candidate means
-      // the TURN server accepted these credentials and allocated a port.
-      const pc = new RTCPeerConnection({ iceServers: turn, iceTransportPolicy: 'relay' })
-      pc.createDataChannel('probe')
-      let relayCandidates = 0
-      const done = new Promise((resolve) => {
-        pc.addEventListener('icecandidate', (event) => {
-          if (!event.candidate) resolve(undefined)
-          else if (event.candidate.type === 'relay') relayCandidates += 1
-        })
-        setTimeout(resolve, 10000)
-      })
-      await pc.setLocalDescription(await pc.createOffer())
-      await done
-      pc.close()
-      return { ttlSeconds: expiry - Math.floor(Date.now() / 1000), urls: turn.flatMap((s) => s.urls), relayCandidates }
+      const part = joined.result.media.jwt.split('.')[1]
+      const payload = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')))
+      return { id: joined.result.participantId, grantRoom: joined.result.media.room, payload, fresh: fresh.result.room }
       `,
     )
-    expect(outcome.urls.length).toBeGreaterThan(0)
-    expect(outcome.ttlSeconds).toBeGreaterThan(0)
-    expect(outcome.ttlSeconds).toBeLessThanOrEqual(3600)
-    expect(outcome.relayCandidates).toBeGreaterThan(0)
+    expect(outcome.grantRoom).toBe(`livedeck-${room}`)
+    expect(outcome.fresh).toBe(outcome.grantRoom)
+    expect(outcome.payload).toMatchObject({ room: outcome.grantRoom, context: { user: { id: outcome.id, moderator: 'false' } } })
+    const lifetime = (outcome.payload.exp as number) - Math.floor(Date.now() / 1000)
+    expect(lifetime).toBeGreaterThan(0)
+    expect(lifetime).toBeLessThanOrEqual(3600)
   })
 })

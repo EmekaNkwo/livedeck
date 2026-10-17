@@ -26,7 +26,6 @@ type SettingsState = {
   setReducedMotion: (mode: StudioSettings['reducedMotion']) => void
   setPreviewFrameRate: (fps: FrameRateId) => void
   setMonitorProgramAudio: (enabled: boolean) => void
-  setIceServerUrls: (urls: string[]) => void
   setSignalingServerUrl: (url: string) => void
   reset: () => void
 }
@@ -66,9 +65,6 @@ export const useSettingsStore = create<SettingsState>()(
       setMonitorProgramAudio: (monitorProgramAudio) =>
         set((state) => ({ settings: { ...state.settings, monitorProgramAudio } })),
 
-      setIceServerUrls: (iceServerUrls) =>
-        set((state) => ({ settings: { ...state.settings, iceServerUrls } })),
-
       setSignalingServerUrl: (signalingServerUrl) =>
         set((state) => ({ settings: { ...state.settings, signalingServerUrl } })),
 
@@ -79,27 +75,26 @@ export const useSettingsStore = create<SettingsState>()(
       storage: createJSONStorage(() => createSafeStorage()),
       // Only `settings` is persisted; `revision` is a render-scheduling detail.
       partialize: (state) => ({ settings: state.settings }),
-      version: 3,
+      version: 4,
       /**
-       * v1/v2 → v3: the signaling transport setting is gone.
-       *
-       * Media now goes through the SFU, so there is one transport and nothing
-       * to choose. A persisted `signalingTransport` is dropped; the server URL
-       * is kept. The static STUN list that used to be the default is cleared
-       * too, because the server now issues ICE servers per session.
+       * v1/v2 dropped the signaling transport choice; v3 the static STUN
+       * list. Both, and anything older, are dropped here; the server URL and
+       * every other preference are kept.
+       */
+      /*
+       * v3 → v4: extra ICE servers are gone. Media travels through Jitsi,
+       * which brings its own STUN and TURN; a list here would do nothing.
        */
       migrate: (persisted, version) => {
-        if (version >= 3) return persisted
-        const state = persisted as { settings?: Record<string, unknown> } | undefined
-        if (!state?.settings) return persisted
-        const { signalingTransport: _dropped, iceServerUrls, ...rest } = state.settings
-        void _dropped
-        const wasDefaultStun =
-          Array.isArray(iceServerUrls) && iceServerUrls.every((url) => String(url).startsWith('stun:stun'))
-        return {
-          ...state,
-          settings: { ...rest, iceServerUrls: wasDefaultStun ? [] : iceServerUrls },
-        }
+        if (version >= 4) return persisted
+        const state = persisted as { settings?: unknown } | undefined
+        // Only an object can be migrated; anything else goes to validation,
+        // which reports it and restores the defaults.
+        if (!state?.settings || typeof state.settings !== 'object') return persisted
+        const { signalingTransport: _transport, iceServerUrls: _ice, ...rest } = state.settings as Record<string, unknown>
+        void _transport
+        void _ice
+        return { ...state, settings: rest }
       },
       // Merge rather than replace, so a settings key added in a later version
       // gets its default instead of becoming undefined.

@@ -52,7 +52,6 @@ describe('actions', () => {
     store().setReducedMotion('always')
     store().setPreviewFrameRate(60)
     store().setMonitorProgramAudio(true)
-    store().setIceServerUrls(['turn:example.org:3478|u:p'])
     store().setSignalingServerUrl('https://media.example.org')
     expect(store().revision).toBe(1)
     expect(store().settings).toMatchObject({
@@ -61,7 +60,6 @@ describe('actions', () => {
       reducedMotion: 'always',
       previewFrameRate: 60,
       monitorProgramAudio: true,
-      iceServerUrls: ['turn:example.org:3478|u:p'],
       signalingServerUrl: 'https://media.example.org',
     })
   })
@@ -85,10 +83,10 @@ describe('actions', () => {
 })
 
 describe('persistence', () => {
-  it('persists only settings, at version 3', () => {
+  it('persists only settings, at version 4', () => {
     store().setOutput({ aspectRatio: '9:16' })
     const persisted = readPersisted()
-    expect(persisted.version).toBe(3)
+    expect(persisted.version).toBe(4)
     expect(Object.keys(persisted.state)).toEqual(['settings'])
     expect(persisted.state.settings).toMatchObject({ output: { aspectRatio: '9:16' } })
   })
@@ -157,12 +155,12 @@ describe('persistence', () => {
 })
 
 describe('migration to v3', () => {
-  it('drops signalingTransport and clears the old default STUN list, keeping the server URL', async () => {
+  it('drops signalingTransport and any ICE list, keeping every other preference', async () => {
     writePersisted(
       {
         settings: {
           signalingTransport: 'websocket',
-          iceServerUrls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
+          iceServerUrls: ['turn:turn.example.org|u:p'],
           signalingServerUrl: 'https://relay.example.org',
           snapToGuides: false,
         },
@@ -170,30 +168,20 @@ describe('migration to v3', () => {
       1,
     )
     await rehydrate()
-    expect(store().settings.iceServerUrls).toEqual([])
     expect(store().settings.signalingServerUrl).toBe('https://relay.example.org')
     expect(store().settings.snapToGuides).toBe(false)
     expect(store().settings).not.toHaveProperty('signalingTransport')
+    expect(store().settings).not.toHaveProperty('iceServerUrls')
     // The migrated shape is written back at the current version.
-    expect(readPersisted().version).toBe(3)
-    expect(readPersisted().state.settings).not.toHaveProperty('signalingTransport')
+    expect(readPersisted().version).toBe(4)
+    expect(readPersisted().state.settings).not.toHaveProperty('iceServerUrls')
   })
 
-  it('keeps a custom ICE list from v2', async () => {
-    writePersisted(
-      { settings: { signalingTransport: 'sfu', iceServerUrls: ['turn:turn.example.org|u:p'] } },
-      2,
-    )
+  it('drops the ICE list a v3 install kept', async () => {
+    writePersisted({ settings: { iceServerUrls: ['stun:stun.example.org'], showSafeAreas: true } }, 3)
     await rehydrate()
-    expect(store().settings.iceServerUrls).toEqual(['turn:turn.example.org|u:p'])
-  })
-
-  it('passes a non-array ICE value through to validation, which drops it', async () => {
-    const issues = collectIssues()
-    writePersisted({ settings: { iceServerUrls: 'stun:stun.example.org' } }, 1)
-    await rehydrate()
-    expect(store().settings.iceServerUrls).toEqual([])
-    expect(issues[0]?.message).toContain('iceServerUrls')
+    expect(store().settings).not.toHaveProperty('iceServerUrls')
+    expect(store().settings.showSafeAreas).toBe(true)
   })
 
   it('leaves an old state without settings for merge to default', async () => {
@@ -203,11 +191,10 @@ describe('migration to v3', () => {
     expect(store().settings).toEqual(DEFAULT_SETTINGS)
   })
 
-  it('does not rewrite state stored by a newer version', async () => {
-    writePersisted({ settings: { showSafeAreas: true, iceServerUrls: ['stun:stun.x'] } }, 4)
+  it('does not migrate state stored at the current version', async () => {
+    writePersisted({ settings: { showSafeAreas: true, signalingServerUrl: 'https://x.example.org' } }, 4)
     await rehydrate()
-    // A v4 payload is taken as-is: the STUN clean-up is a v1/v2 concern.
-    expect(store().settings.iceServerUrls).toEqual(['stun:stun.x'])
     expect(store().settings.showSafeAreas).toBe(true)
+    expect(store().settings.signalingServerUrl).toBe('https://x.example.org')
   })
 })

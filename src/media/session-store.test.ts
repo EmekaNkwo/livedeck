@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { FakeDevice, FakeSignaling, asDevice, asSignalingClient } from '@/test/fake-mediasoup'
+import { FakeLink, FakeSignaling, asSignalingClient } from '@/test/fake-media'
 import { MediaSession } from './media-session'
 import { selectSession, selectSnapshot, useMediaSessionStore } from './session-store'
 import { INITIAL_SNAPSHOT } from './types'
@@ -8,7 +8,7 @@ function makeSession(): MediaSession {
   return new MediaSession({
     url: 'ws://test',
     createSignaling: () => asSignalingClient(new FakeSignaling()),
-    createDevice: () => asDevice(new FakeDevice()),
+    createLink: () => new FakeLink(),
   })
 }
 

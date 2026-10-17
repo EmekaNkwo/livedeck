@@ -4,35 +4,22 @@ import type { RequestMethod } from '../../../shared/protocol'
  * Per-session rate limiting, by category.
  *
  * A single counter over every message is the wrong tool for signaling: a
- * participant joining a full room legitimately fires a burst of transport and
- * consumer requests, and an ICE restart during a network change must never be
- * refused because the same client was also sending state updates. Each
- * category has its own bucket, sized for its real traffic.
+ * director muting several guests must not be refused because the same client
+ * was also pinging, and a grant refresh after a network change must not wait
+ * behind state updates. Each category has its own bucket, sized for its real
+ * traffic.
  *
  * A refused request is *answered* with `rate-limited`, never dropped: a
- * silently discarded media request leaves a connection hanging with no
- * explanation on either side.
+ * silently discarded request leaves a client waiting with no explanation.
  */
 
-export type RateCategory = 'room' | 'media' | 'ice' | 'control' | 'keepalive'
+export type RateCategory = 'room' | 'media' | 'control' | 'keepalive'
 
 export const METHOD_CATEGORY: Record<RequestMethod, RateCategory> = {
   join: 'room',
   leave: 'room',
   getRoomKeys: 'room',
-  getRouterRtpCapabilities: 'keepalive',
-  createWebRtcTransport: 'media',
-  connectWebRtcTransport: 'media',
-  produce: 'media',
-  consume: 'media',
-  resumeConsumer: 'media',
-  pauseConsumer: 'media',
-  closeConsumer: 'media',
-  setConsumerLayers: 'media',
-  pauseProducer: 'media',
-  resumeProducer: 'media',
-  closeProducer: 'media',
-  restartIce: 'ice',
+  getMediaGrant: 'media',
   updateState: 'control',
   control: 'control',
   ping: 'keepalive',
@@ -42,10 +29,8 @@ export type RateLimits = Record<RateCategory, { capacity: number; refillPerSecon
 
 export const DEFAULT_RATE_LIMITS: RateLimits = {
   room: { capacity: 10, refillPerSecond: 0.5 },
-  // A twelve-peer room on join: two transports, two connects, up to three
-  // producers and ~30 consumers plus their resumes. Well inside this.
-  media: { capacity: 150, refillPerSecond: 15 },
-  ice: { capacity: 20, refillPerSecond: 1 },
+  // Grant refreshes: one per reconnect or per hour. Room for a flaky network.
+  media: { capacity: 10, refillPerSecond: 0.2 },
   control: { capacity: 40, refillPerSecond: 4 },
   keepalive: { capacity: 30, refillPerSecond: 1 },
 }

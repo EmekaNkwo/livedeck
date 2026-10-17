@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# The LiveDeck media server: signaling + mediasoup SFU.
+# The LiveDeck server: rooms, roles, director control and Jitsi media grants.
 #
 # BUILD CONTEXT IS THE REPOSITORY ROOT, NOT `server/`
 # ---------------------------------------------------
@@ -8,36 +8,21 @@
 # browser and this process. From the repository root:
 #
 #   docker build -f server/Dockerfile -t livedeck-server .
-#   docker run --rm -p 3001:3001 -p 40000-40003:40000-40003/udp -p 40000-40003:40000-40003/tcp \
-#     -e ALLOWED_ORIGINS=http://localhost:5173 \
-#     -e MEDIASOUP_ANNOUNCED_ADDRESS=<public ip or hostname> \
+#   docker run --rm -p 3001:3001 \
+#     -e ALLOWED_ORIGINS=https://studio.example.com \
 #     -e ROOM_KEY_SECRET=<long random string> \
+#     -e JAAS_APP_ID=... -e JAAS_API_KEY_ID=... -e JAAS_PRIVATE_KEY="$(cat jaas.pk)" \
 #     livedeck-server
 #
-# MEDIA PORTS
-# -----------
-# mediasoup needs a UDP (and TCP fallback) port reachable from the internet,
-# one per worker starting at MEDIASOUP_PORT. Publish them and set
-# MEDIASOUP_ANNOUNCED_ADDRESS to what clients can reach; the container's own
-# interface is never that.
+# Audio and video go through Jitsi, so this image needs only its HTTP port.
 
 ARG NODE_VERSION=22-bookworm-slim
 
 # ---------------------------------------------------------------- dependencies
-# mediasoup downloads a prebuilt worker for the platform during install; when
-# none matches it compiles one, which needs python3, make and a C++ toolchain.
-# Those are only in this stage.
 FROM node:${NODE_VERSION} AS deps
-RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip make g++ ca-certificates \
- && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/server
 COPY server/package.json server/package-lock.json ./
-# Installed ONCE for the whole build. mediasoup normally downloads a prebuilt
-# worker; when it cannot, it compiles one with a C++ job per CPU core, which
-# on a many-core build host runs out of memory. Pinning the install to two
-# cores bounds that compile (mediasoup sizes its jobs from the CPU affinity).
-RUN if [ "$(nproc)" -gt 2 ]; then taskset -c 0-1 npm ci; else npm ci; fi
+RUN npm ci --no-audit --no-fund
 
 # ----------------------------------------------------------------------- build
 FROM node:${NODE_VERSION} AS build
@@ -53,8 +38,6 @@ WORKDIR /app/server
 RUN npm run build
 
 # ---------------------------------------------------------- runtime dependencies
-# The same install with dev dependencies pruned, so mediasoup's worker is
-# never fetched or compiled a second time.
 FROM deps AS prod-deps
 RUN npm prune --omit=dev && npm cache clean --force
 
@@ -62,22 +45,18 @@ RUN npm prune --omit=dev && npm cache clean --force
 FROM node:${NODE_VERSION} AS runtime
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
-    PORT=3001 \
-    MEDIASOUP_PORT=40000 \
-    MEDIASOUP_WORKERS=2
+    PORT=3001
 
 WORKDIR /app/server
 COPY --from=prod-deps --chown=node:node /app/server/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/server/dist ./dist
 COPY --from=build --chown=node:node /app/server/package.json ./package.json
-# `dist/shared/*.js` resolves `zod` from its own directory upwards, which is
-# /app; point that at the server's tree.
+# `dist/shared/*.js` resolves `zod` from its own directory upwards; this link
+# also covers anything resolved from /app.
 RUN ln -s /app/server/node_modules /app/node_modules
 
 USER node
 EXPOSE 3001
-EXPOSE 40000-40003/udp
-EXPOSE 40000-40003/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"

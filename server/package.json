@@ -5,7 +5,7 @@
   "engines": {
     "node": ">=20.9"
   },
-  "description": "LiveDeck media server: WebSocket signaling plus a mediasoup SFU in one process.",
+  "description": "LiveDeck server: rooms, roles and director control over WebSocket, and Jitsi media grants.",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.build.json",
@@ -15,7 +15,6 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "mediasoup": "^3.29.0",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
   },

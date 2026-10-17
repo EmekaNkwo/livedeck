@@ -1,6 +1,4 @@
-import type { MediasoupConfig } from '../mediasoup/config'
-import { Room, RoomError } from '../mediasoup/room'
-import type { WorkerPool } from '../mediasoup/worker-pool'
+import { Room, RoomError } from './room'
 
 /**
  * Creates rooms on demand and drops them when the last participant leaves.
@@ -37,50 +35,31 @@ export function readRoomLimits(env: Record<string, string | undefined>): RoomLim
 }
 
 export type RoomManager = {
-  getOrCreate: (name: string) => Promise<Room>
+  getOrCreate: (name: string) => Room
   get: (name: string) => Room | null
   /** Drop a room if it is empty. Call after every leave. */
   reapIfEmpty: (name: string) => void
   stats: () => { rooms: number; peers: number }
-  /** Producer and consumer totals across rooms, for /healthz and load runs. */
-  mediaStats: () => { producers: number; consumers: number }
   closeAll: () => void
 }
 
 export function createRoomManager(options: {
-  pool: WorkerPool
-  config: MediasoupConfig
   limits?: Partial<RoomLimits>
   log: (event: string, detail?: Record<string, unknown>) => void
 }): RoomManager {
   const limits = { ...DEFAULT_ROOM_LIMITS, ...options.limits }
   const rooms = new Map<string, Room>()
-  // Two joins racing on a new room must share one router.
-  const creating = new Map<string, Promise<Room>>()
 
-  const getOrCreate = async (name: string): Promise<Room> => {
+  const getOrCreate = (name: string): Room => {
     const existing = rooms.get(name)
     if (existing && !existing.isClosed) return existing
-    const pending = creating.get(name)
-    if (pending) return pending
-
     if (rooms.size >= limits.maxRooms) {
       throw new RoomError('server-full', 'The server is at capacity. Try again shortly.')
     }
-    const promise = Room.create(options.pool, {
-      name,
-      config: options.config,
-      maxPeers: limits.maxPeersPerRoom,
-      log: options.log,
-    })
-      .then((room) => {
-        rooms.set(name, room)
-        options.log('room-created', { room: name })
-        return room
-      })
-      .finally(() => creating.delete(name))
-    creating.set(name, promise)
-    return promise
+    const room = new Room({ name, maxPeers: limits.maxPeersPerRoom, log: options.log })
+    rooms.set(name, room)
+    options.log('room-created', { room: name })
+    return room
   }
 
   return {
@@ -99,17 +78,6 @@ export function createRoomManager(options: {
       rooms: rooms.size,
       peers: [...rooms.values()].reduce((sum, room) => sum + room.peers.size, 0),
     }),
-    mediaStats: () => {
-      let producers = 0
-      let consumers = 0
-      for (const room of rooms.values()) {
-        for (const peer of room.peers.values()) {
-          producers += peer.producers.size
-          consumers += peer.consumers.size
-        }
-      }
-      return { producers, consumers }
-    },
     closeAll: () => {
       for (const room of rooms.values()) room.close('server-shutdown')
       rooms.clear()
