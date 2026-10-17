@@ -1,5 +1,6 @@
-# LiveDeck on one host with UDP: the studio, the media server and a TURN
-# relay. See deploy/README.md.
+# LiveDeck on one host: the studio behind Caddy, and the LiveDeck server.
+# Audio and video go through JaaS (Jitsi as a Service), so no media ports are
+# needed here. See deploy/README.md.
 #
 #   cp deploy/.env.example deploy/.env    # then fill it in
 #   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
@@ -7,7 +8,7 @@
 name: livedeck
 
 services:
-  # Studio + TLS + proxy for /signal. The only service with HTTP ports.
+  # Studio + TLS + proxy for /signal. The only service with public ports.
   web:
     build:
       context: ..
@@ -26,8 +27,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Signaling + mediasoup. Two workers, so two media ports: 40000 and 40001.
-  # Change MEDIASOUP_WORKERS and the published range together.
+  # Rooms, roles, director control, and the signer of Jitsi media grants.
   server:
     build:
       context: ..
@@ -35,57 +35,12 @@ services:
     environment:
       ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:-https://${LIVEDECK_DOMAIN}}
       ROOM_KEY_SECRET: ${ROOM_KEY_SECRET:?set ROOM_KEY_SECRET (32+ random characters)}
-      MEDIASOUP_ANNOUNCED_ADDRESS: ${PUBLIC_IP:?set PUBLIC_IP to the address clients reach}
-      MEDIASOUP_PORT: "40000"
-      MEDIASOUP_WORKERS: "2"
       TRUST_PROXY: "true"
-      TURN_URLS: turn:${LIVEDECK_DOMAIN}:3478?transport=udp,turn:${LIVEDECK_DOMAIN}:3478?transport=tcp
-      TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET:?set TURN_STATIC_AUTH_SECRET}
-      TURN_TTL_SECONDS: "3600"
+      JAAS_APP_ID: ${JAAS_APP_ID:?set JAAS_APP_ID from the JaaS console}
+      JAAS_API_KEY_ID: ${JAAS_API_KEY_ID:?set JAAS_API_KEY_ID ("<app id>/<key id>")}
+      JAAS_PRIVATE_KEY: ${JAAS_PRIVATE_KEY:?set JAAS_PRIVATE_KEY (the key PEM, newlines as \n)}
     expose:
       - "3001"
-    ports:
-      - "40000-40001:40000-40001/udp"
-      - "40000-40001:40000-40001/tcp"
-    restart: unless-stopped
-
-  # TURN for participants behind symmetric NAT or UDP-blocking firewalls.
-  # Credentials are minted per session by the server from the shared secret
-  # and expire after an hour; nothing static is ever given to a browser.
-  turn:
-    image: coturn/coturn:4.6.3
-    command:
-      - -n
-      - --log-file=stdout
-      - --no-cli
-      - --fingerprint
-      - --use-auth-secret
-      - --static-auth-secret=${TURN_STATIC_AUTH_SECRET:?set TURN_STATIC_AUTH_SECRET}
-      - --realm=${LIVEDECK_DOMAIN}
-      - --listening-port=3478
-      - --external-ip=${PUBLIC_IP}
-      - --min-port=49160
-      - --max-port=49200
-      - --user-quota=12
-      - --total-quota=1200
-      - --stale-nonce=600
-      - --no-multicast-peers
-      # Never relay into private networks: a TURN server is otherwise a
-      # proxy into whatever network it sits on.
-      - --denied-peer-ip=0.0.0.0-0.255.255.255
-      - --denied-peer-ip=10.0.0.0-10.255.255.255
-      - --denied-peer-ip=100.64.0.0-100.127.255.255
-      - --denied-peer-ip=127.0.0.0-127.255.255.255
-      - --denied-peer-ip=169.254.0.0-169.254.255.255
-      - --denied-peer-ip=172.16.0.0-172.31.255.255
-      - --denied-peer-ip=192.168.0.0-192.168.255.255
-      - --denied-peer-ip=::1
-      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-    ports:
-      - "3478:3478/udp"
-      - "3478:3478/tcp"
-      - "49160-49200:49160-49200/udp"
     restart: unless-stopped
 
 volumes:

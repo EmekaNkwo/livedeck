@@ -8,12 +8,14 @@ The joining workflow follows a **meeting tool**: you open a control room, copy
 one room link, and send it. Whoever opens it sets a name, clicks **Join room**,
 and appears in your control room — nothing to paste back.
 
-Participants' audio and video go through a **media server** (an SFU built on
-[mediasoup](https://mediasoup.org)) that ships in [`server/`](server/). Each
-participant sends its camera once and receives everyone else from the server,
-which is what lets a room hold a dozen people. The server also decides who may
-control whom. Everything *except* joining a room — capture, scenes, mixing,
-recording — works with no server at all. See [The media server](#the-media-server).
+Participants' audio and video travel through **Jitsi** (JaaS in production):
+each participant sends its camera once to a Jitsi video bridge and receives
+everyone else from it, which is what lets a room hold a dozen people. The
+**LiveDeck server** in [`server/`](server/) runs the room itself: who is in it,
+each person's role, the director's controls, and the signed token that admits
+each participant to the room's conference. Everything *except* joining a room
+— capture, scenes, mixing, recording — works with no server at all. See
+[The media server](#the-media-server).
 
 The production engine underneath follows **OBS**: a logical canvas, saved scenes
 you cut between, a real audio mixer, and a recorder that captures the composed
@@ -58,10 +60,11 @@ Camera / Screen / Guest sources
 
 ```
 Guest A ─┐                       ┌─ Guest A hears B + C, never A
-Guest B ─┼──▶  media server  ───┼─ Guest B hears A + C
-Guest C ─┘   (mediasoup SFU)     └─ Director receives A, B, C
-                   │
-          authorizes every control command
+Guest B ─┼──▶  Jitsi bridge  ───┼─ Guest B hears A + C
+Guest C ─┘   (JaaS)              └─ Director receives A, B, C
+
+LiveDeck server: rooms, roles, director commands, and a signed
+Jitsi token per participant (only the director moderates)
 ```
 
 ---
@@ -108,9 +111,12 @@ Guest C ─┘   (mediasoup SFU)     └─ Director receives A, B, C
 npm install
 npm run dev                            # studio  -> http://localhost:5173
 
-# in a second terminal — needed for guests to join by room link
+# needed for guests to join by room link: a local Jitsi and the server
+npm run jitsi:up                       # Jitsi -> https://localhost:8443 (Docker)
 npm install --prefix server
-npm --prefix server run dev            # media server -> http://localhost:3001
+JITSI_PUBLIC_URL=https://localhost:8443 JITSI_DOMAIN=meet.jitsi JITSI_APP_ID=livedeck \
+  JITSI_APP_SECRET=livedeck-local-jitsi-secret-0123456789 \
+  npm --prefix server run dev          # LiveDeck server -> http://localhost:3001
 ```
 
 Name a room (or click **New code**) and click **Open director**. Start your
@@ -118,21 +124,24 @@ camera from the Sources tab, then copy the room link from the Guests tab and
 send it. Your guest opens it, types a name, clicks **Join room**, and appears in
 your control room.
 
-Without the media server running, the Guests panel says so plainly. Nothing
-else depends on it: capture, scenes, the mixer and the recorder all work alone.
+Open https://localhost:8443 once and accept its self-signed certificate, or the
+browser will refuse to load the media library from it. Without the server
+running, the Guests panel says so plainly. Nothing else depends on it: capture,
+scenes, the mixer and the recorder all work alone.
 
 Media capture requires a **secure context**. `localhost` counts as one, so plain
 HTTP works in development. Deploying over `http://` to any other host will stop
 `getUserMedia` from working at all — the app detects this and says so rather
 than blaming permissions.
 
-There are no API keys and no accounts. Environment variables are all optional
-on a laptop — see [`.env.example`](.env.example) for the studio (server
-address) and [`server/.env.example`](server/.env.example) for the server
-(ports, allowed origins, room-key secret, announced address, TURN).
+There are no accounts. Production needs a JaaS app (three values, see
+[`deploy/README.md`](deploy/README.md)); everything else is optional on a
+laptop — see [`.env.example`](.env.example) for the studio (server address)
+and [`server/.env.example`](server/.env.example) for the server (allowed
+origins, room-key secret, media backend).
 
-**Media goes through the server and is never stored there.** The SFU forwards
-RTP between participants; it does not decode, mix or record anything.
+**Media is never stored by LiveDeck.** The Jitsi bridge forwards RTP between
+participants; recordings are made in the director's browser.
 
 ## Scripts
 
@@ -873,103 +882,93 @@ saved.
 ## The media server
 
 ```
-Browser                                   server/
-  MediaSession ── WebSocket /signal ──▶  signaling handlers ── RoomManager
-   ├ send transport  ──── RTP ─────────▶  mediasoup Router (one per room)
-   │   mic / camera / screen producers      ├ WebRtcTransport per participant & direction
-   └ recv transport  ◀─── RTP ──────────    ├ Producer per published track
-       one consumer per remote producer     └ Consumer per (participant, producer)
+Browser                                  server/ (LiveDeck)
+  MediaSession ── WebSocket /signal ──▶  rooms, roles, director control,
+   │                                     room keys, media grants (JWT)
+   │  grant: a token for this room's conference, naming this participant
+   ▼
+  JitsiLink ── lib-jitsi-meet ────────▶  Jitsi (JaaS, or self-hosted)
+   ├ sends: one audio, camera, screen      video bridge forwards RTP,
+   └ receives: every other participant     simulcast, bandwidth estimation
 ```
 
-### Why an SFU
+### Two halves, one authority
 
-In a mesh every participant encodes its camera once *per peer* and uploads all
-of them, so a twelve-person room is twelve encodes and eleven uploads on every
-laptop. With a Selective Forwarding Unit each participant encodes once, sends
-once, and the server forwards; the cost moves to a machine built for it. The
-server never decodes: it forwards RTP packets, picks simulcast layers per
-receiver, and that is all.
+**Jitsi carries the media.** Each participant sends once to a Jitsi video
+bridge and receives everyone else from it, so a twelve-person room costs each
+laptop one encode and one upload. JaaS runs the bridges on public addresses
+with their own TURN, which is why the LiveDeck server needs no media ports and
+runs on any web host.
 
-### The protocol
+**The LiveDeck server decides everything else.** Who is in the room, each
+participant's role, which director commands are allowed, and the room keys.
+Nothing about this is delegated to Jitsi.
 
-One WebSocket per participant carries requests (answered by id) and
-notifications. Every message is a Zod schema in
-[`shared/protocol.ts`](shared/protocol.ts), compiled into both halves and
-validated on both ends: the server does not trust browsers, and the browser
-does not trust the server.
+The two are joined by the **media grant**. On join, the server signs a JWT for
+the room's Jitsi conference (`livedeck-<room>`), valid for at most an hour,
+naming the participant by their LiveDeck id and making only the director a
+Jitsi moderator. A browser cannot join the conference without passing the
+server's role rules first, and cannot claim someone else's identity there: the
+id other participants see comes from the token, through Jitsi's presence
+identity.
 
-```
-join, getRouterRtpCapabilities, createWebRtcTransport, connectWebRtcTransport,
-restartIce, produce, consume, resumeConsumer, pauseConsumer, closeConsumer,
-setConsumerLayers, pauseProducer, resumeProducer, closeProducer, updateState,
-control, getRoomKeys, leave, ping
-```
+### Matching media to the roster
 
-No request carries the sender's id or role; the server knows which socket sent
-it. `join` carries an optional room key, which is how roles are earned.
+The studio shows a remote track only when:
 
-### The join sequence
+1. its token identity is a participant the server lists,
+2. that participant's role may publish that source (`shared/authorization.ts`),
+3. and it is not the studio's own.
 
-1. Connect the socket.
-2. `join` — the server answers with the participant's id, role, the roster,
-   every producer already in the room, short-lived ICE servers and the
-   router's RTP capabilities.
-3. Load the mediasoup `Device`.
-4. Create the send transport (not for viewers) and the receive transport.
-5. Consume every producer the room already has; each consumer is created
-   paused and resumed once its track is wired.
-6. Publish whatever local tracks were requested, before or after joining.
+A track that arrives before the server announces its sender is held until it
+does. A viewer, or anyone the server does not list, never reaches the
+program, whatever they send to the conference.
 
-Transports connect lazily on the first produce or consume.
+### Sending
+
+A Jitsi participant sends one audio source and up to two videos, camera and
+screen. The microphone and a shared screen's audio are mixed into the one
+audio track. Each slot sends a **clone** of the studio's own track: the stream
+registry owns captures, and lib-jitsi-meet stops the media of tracks it
+disposes. Pausing a source removes it from the conference rather than asking
+Jitsi to mute it, because in Chrome a library-level camera mute re-opens the
+camera behind the studio's back.
 
 ### Quality
 
-Cameras are sent as three simulcast layers (quarter, half, full), screens as
-one sharp low-rate layer with `contentHint: 'detail'`, audio as Opus with DTX
-on microphones. A quality controller samples both transports every two seconds
-and moves a downlink and an uplink tier through a hysteresis machine — three
-bad samples to step down, ten good ones to step up — selecting the simulcast
-layer the server forwards for every remote video and capping the camera's
-layers. A single lost burst never changes the picture.
-
-### Mix-minus
-
-A participant never consumes its own producers, and the server refuses a
-request to. So each guest hears everyone *but themselves*, by construction
-rather than by subtraction, and the director's program receives everyone.
+The bridge does simulcast and bandwidth estimation itself. On top, a quality
+controller samples the connection every two seconds and moves a downlink and
+an uplink tier through a hysteresis machine (three bad samples down, ten good
+ones up). The downlink tier caps the height requested for every remote video
+(180, 360, 720); the uplink tier caps the camera this participant sends.
 
 ### Reconnection
 
-The socket reconnects with backoff. On reconnect the session re-joins with a
-**resume token**; if the server still holds the participant (it keeps a
-dropped participant's transports for thirty seconds), ICE is restarted on both
-transports and local producers are kept. If it does not, the session rebuilds
-from scratch: new transports, local tracks re-published, remote producers
-re-consumed. Identity is whatever the server reports, so the director keeps
-one tile per person either way. Every step has a timeout; nothing sits in
-"connecting" forever. The network coming back or the tab becoming visible
-triggers a check immediately rather than at the next heartbeat.
-
-### Honest status reporting
-
-A participant is `connected` only when the studio's receive transport is
-connected and the server lists them. Whether their media is arriving is a
-separate fact, shown separately. Diagnostics render every unavailable metric
-as an em dash instead of inventing numbers.
+The socket reconnects with backoff and re-joins with a **resume token**; if
+the server still holds the participant (thirty seconds after a dropped
+socket), the conference link is kept. If it does not, the participant has a
+new identity and the conference is rejoined with a new grant. A conference
+that drops on its own (a bridge restart, an expired token on reconnect) is
+rejoined with a fresh grant, three times before the studio says it cannot
+restore media. Closing or reloading a tab is a deliberate leave: the session
+leaves cleanly, so the server removes the participant at once instead of
+holding a ghost.
 
 ### Running the server
 
 ```bash
+npm run jitsi:up          # local Jitsi with JWT auth (Docker), https://localhost:8443
 cd server
 npm install
-npm run dev          # http://localhost:3001, signaling on ws://localhost:3001/signal
+JITSI_PUBLIC_URL=https://localhost:8443 JITSI_DOMAIN=meet.jitsi JITSI_APP_ID=livedeck \
+  JITSI_APP_SECRET=livedeck-local-jitsi-secret-0123456789 npm run dev
 ```
 
-The studio already points there. The address is blank by default and resolved:
-`VITE_SIGNALING_URL` if set at build time, else `ws://<hostname>:3001` when the
-page URL carries a port (development), else the page's own origin. Override it
-in **Settings → Media server**. `/healthz` reports rooms, participants,
-connections and workers.
+The studio already points at `http://localhost:3001`. The address is blank by
+default and resolved: `VITE_SIGNALING_URL` if set at build time, else
+`ws://<hostname>:3001` in a development build, else the page's own origin
+(port included). Override it in **Settings → Media server**. `/healthz`
+reports rooms, participants, connections and the media backend.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -977,65 +976,33 @@ connections and workers.
 | `HOST` | `0.0.0.0` | Interface to bind |
 | `ALLOWED_ORIGINS` | *unset* | Comma-separated browser origins allowed to connect; unset means any, and the server warns |
 | `ROOM_KEY_SECRET` | *generated* | Director and producer keys are HMACs of the room name with this. Unset, keys change on every restart and the server warns |
-| `MEDIASOUP_ANNOUNCED_ADDRESS` | *unset* | The address clients can reach for media. Required for anything but localhost |
-| `MEDIASOUP_PORT` | `40000` | First media port; each worker takes the next one, UDP and TCP |
-| `MEDIASOUP_WORKERS` | CPUs, max 4 | mediasoup worker processes; rooms are placed on the least loaded |
-| `ROOM_MAX_PEERS` | `16` | Participants per room, every connection counted — twelve guests plus director and crew |
-| `CLOUDFLARE_TURN_KEY_ID` / `..._API_TOKEN` | *unset* | Cloudflare Realtime TURN |
-| `TURN_URLS` / `TURN_STATIC_AUTH_SECRET` | *unset* | A coturn-compatible relay using `use-auth-secret` |
-| `TURN_TTL_SECONDS` | `3600` | Credential lifetime, 600–7200 |
+| `ROOM_MAX_PEERS` | `16` | Participants per room, every connection counted |
+| `JAAS_APP_ID` / `JAAS_API_KEY_ID` / `JAAS_PRIVATE_KEY` | *unset* | JaaS: the AppID, the API key id (`<AppID>/<key id>`) and its RS256 private key |
+| `JITSI_PUBLIC_URL` / `JITSI_DOMAIN` / `JITSI_APP_ID` / `JITSI_APP_SECRET` | *unset* | A self-hosted Jitsi with JWT auth (HS256), as the local test stack |
+| `MEDIA_GRANT_TTL_SECONDS` | `3600` | Token lifetime, 600–3600 |
 
-### TURN
-
-Media now terminates at the server, so a participant only has to reach *it*.
-Most networks can, over UDP; where UDP is blocked the transport falls back to
-TCP. A participant behind a NAT that blocks both still needs a TURN relay, and
-the studio says so when ICE fails.
-
-Credentials are minted **per session**, delivered only inside the
-authenticated join response, and expire after `TURN_TTL_SECONDS`. There is no
-endpoint that hands a credential to whoever asks; the previous design served
-one 24-hour credential to any request, which was a free relay for anyone who
-found the URL.
+Without a media backend the server starts, warns, and refuses joins with a
+clear error rather than admitting participants who can never have media.
 
 ### Hardening
 
-- WebSocket frames are capped at 256 KB (`maxPayload`), matching the largest
-  SDP the protocol accepts.
+- WebSocket frames are capped at 256 KB (`maxPayload`).
 - Per-address and total connection caps at upgrade.
 - A socket that has not joined within fifteen seconds is closed; dead sockets
   are reaped by a thirty-second heartbeat.
 - Rate limiting is a token bucket **per category** — room operations, media
-  signaling, ICE restarts, control, keepalive — so a burst of consumer
-  requests on join cannot starve an ICE restart during a network change. A
-  refused request is answered with `rate-limited`, never dropped.
-- The protocol has no field for a client to claim an identity or role.
+  grants, control, keepalive. A refused request is answered with
+  `rate-limited`, never dropped.
+- The protocol has no field for a client to claim an identity or role, and the
+  Jitsi identity comes from a token only the server signs.
 
 ### Deployment
 
-[`deploy/`](deploy/README.md) runs the whole product on one host that can
-publish UDP: Caddy (studio, TLS, `/signal` proxy), the media server, and
-coturn, in one `docker compose` command. The browser suite runs against it
-with `LIVEDECK_BASE_URL=https://<domain> npm run e2e`.
-
-The server holds rooms and routers in one process's memory and needs a
-reachable UDP (and TCP) media port. That means a container or VM with those
-ports published — Fly.io, a VPS, Kubernetes with a host port — and
-`MEDIASOUP_ANNOUNCED_ADDRESS` set to what clients can reach. It does not run on
-a serverless platform, and Render's web services publish only one HTTP port,
-so on Render media is limited to TCP through a TURN relay; see
-[`render.yaml`](render.yaml). Scaling past one process needs a room-to-instance
-mapping first.
-
-```bash
-# from the repository root
-docker build -f server/Dockerfile -t livedeck-server .
-docker run --rm -p 3001:3001 -p 40000-40003:40000-40003/udp -p 40000-40003:40000-40003/tcp \
-  -e ALLOWED_ORIGINS=https://studio.example.com \
-  -e MEDIASOUP_ANNOUNCED_ADDRESS=203.0.113.10 \
-  -e ROOM_KEY_SECRET=$(openssl rand -base64 32) \
-  livedeck-server
-```
+The server needs only its HTTP port: it runs on Render ([`render.yaml`](render.yaml)),
+Fly.io, a VPS or Kubernetes, with the studio on any static host.
+[`deploy/README.md`](deploy/README.md) covers JaaS, Render + Vercel, and a
+one-host Docker setup. Rooms live in one process's memory; scaling past one
+process needs a room-to-instance mapping first.
 
 ## Persistence
 
@@ -1239,45 +1206,50 @@ across the internet, which needs two real networks.
 
 Collected honestly in one place.
 
-1. **The media server must be reachable over UDP or TCP on its media port.**
-   A host that publishes only HTTP (Render's web services, serverless
-   platforms) cannot carry media directly; a TURN relay in front is the
-   fallback and costs latency. Set `MEDIASOUP_ANNOUNCED_ADDRESS` to the
-   public address, or nothing outside the host will connect.
-2. **One process.** Rooms and routers live in memory; rooms do not span
+1. **Media needs a Jitsi backend.** Production uses JaaS, which is a paid
+   service past its free tier; a self-hosted Jitsi needs a host that accepts
+   UDP on its bridge port. Without either, the server refuses joins.
+2. **A participant sends one audio track.** A guest's microphone and shared
+   screen audio are mixed before sending, so the director's mixer receives
+   them as one channel.
+3. **The bridge cannot stop someone holding a valid token from sending.**
+   The studio composes only what each participant's role allows, matched on
+   the token identity; a viewer's media never reaches the program, but it
+   does reach the bridge.
+4. **One process.** Rooms live in memory; rooms do not span
    instances and a restart drops every room (clients reconnect and re-join).
-3. **Screen capture targets are chosen by the browser, not the app.**
-4. **Display audio is not guaranteed.** `audio: true` is a request; whether a
+5. **Screen capture targets are chosen by the browser, not the app.**
+6. **Display audio is not guaranteed.** `audio: true` is a request; whether a
    track arrives depends on the OS, browser and surface. The app inspects the
    tracks and says when none arrived.
-5. **A crash loses the fragment in progress.** Fragments and chunks are
+7. **A crash loses the fragment in progress.** Fragments and chunks are
    stored about every second; the recording is recovered and finalized on
    the next load, minus that last second.
-6. **The MP4 path needs WebCodecs H.264.** Chromium has it. Firefox records
+8. **The MP4 path needs WebCodecs H.264.** Chromium has it. Firefox records
    WebM through MediaRecorder (finalized with cues); Safari records MP4
    natively through MediaRecorder.
-7. **The main thread still plans each frame.** Painting is in a worker, but
+9. **The main thread still plans each frame.** Painting is in a worker, but
    turning `<video>` elements into `VideoFrame`s happens on the page, so a
    very long main-thread task can still delay a frame.
-8. **Output quality cannot exceed the sources.**
-9. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
+10. **Output quality cannot exceed the sources.**
+11. **Pausing a recording is unavailable** where `MediaRecorder.pause` is
    missing. The control is disabled with an explanation.
-10. **Large recordings may exceed the storage quota.** Recording refuses to
+12. **Large recordings may exceed the storage quota.** Recording refuses to
     start with less than 200 MB free, and a quota error mid-recording stops
     it and keeps what was stored.
-11. **Precise drag editing is impractical on small screens.**
-12. **Local image and video files are capped at 500 MB** and live in
+13. **Precise drag editing is impractical on small screens.**
+14. **Local image and video files are capped at 500 MB** and live in
     IndexedDB.
-13. **A scene window mirrors the control room, so it depends on it.** The
+15. **A scene window mirrors the control room, so it depends on it.** The
     program is sent to it over a loopback peer connection inside the same
     browser. With no control room open it falls back to its own compositor.
-14. **Remote control needs the server.** Commands go through it so it can
+16. **Remote control needs the server.** Commands go through it so it can
     authorize them; without a connection the UI disables them.
-15. **The director key lives in the browser that claimed the room.** Lose
+17. **The director key lives in the browser that claimed the room.** Lose
     that browser's storage and the key is gone with it; set `ROOM_KEY_SECRET`
     so a known key can be re-derived, or open the room while it is empty to
     claim it again.
-16. **The room name is not a password.** It grants the guest role to anyone
+18. **The room name is not a password.** It grants the guest role to anyone
     who reaches the server. The keys are what gate the director and producer
     roles.
 
@@ -1360,14 +1332,13 @@ the channel is not muted in the mixer.
 **"Not stored" on a recording** — The storage quota was exceeded. Download it
 now; it will be lost on reload. Delete older recordings to free space.
 
-**A guest is listed but no media arrives** — The browser could not reach the
-media server's media port. On a laptop the server auto-detects its LAN
-address; anywhere else `MEDIASOUP_ANNOUNCED_ADDRESS` must be the public
-address and the UDP/TCP media ports must be published (`docker run -p
-40000-40003:40000-40003/udp …`). The server's startup line prints what it is
-announcing. A guest behind a NAT that blocks both UDP and TCP needs TURN: set
-the Cloudflare or coturn variables in `server/.env`; credentials are then
-issued per session inside the join.
+**A guest is listed but no media arrives** — The conference did not connect.
+The Guests panel shows the reason the media library reported (a refused token,
+a full conference, a network that blocks the bridge). With JaaS, check the
+three `JAAS_*` values: `/healthz` must report `"media": "jaas"`. With the local
+Jitsi, the bridge must advertise an address the browser can send UDP to; see
+`deploy/jitsi-local/jitsi-local.sh`, and accept https://localhost:8443's
+certificate once.
 
 **"Could not reach the media server", but it is up** — Most likely
 `ALLOWED_ORIGINS` does not contain the studio's origin, and the socket is being
@@ -1431,15 +1402,16 @@ src/
 │   ├── diagnostics/      diagnostics panel
 │   └── shared/           button, panel, fields, dialog, status, toast, error boundary
 ├── hooks/                one responsibility each; the only React↔service bridge
-├── media/                the SFU client: signaling client, media session,
-│                         encodings, quality manager and controller, session store
+├── media/                signaling client, media session, the Jitsi link (loader,
+│                         typed library surface, audio mix), quality manager and
+│                         controller, session store
 ├── services/
 │   ├── media/            stream registry (ownership), device + capture services
 │   ├── composition/      compositor, frame clock, composition model, interaction
 │   │                     controller, frame providers, asset cache, program link
 │   ├── audio/            mixer graph, master chain, meter worklet, meter bus
 │   ├── recording/        recording engine, MIME negotiation, WebM duration, recovery
-│   ├── signaling/        server address, ICE server parsing, URL parameters
+│   ├── signaling/        server address, URL parameters
 │   ├── sources/          source factory, default placement, stream keys
 │   └── persistence/      localStorage, schemas, issues, documents, assets (IndexedDB),
 │                         recordings (IndexedDB, chunked), object URLs
@@ -1447,23 +1419,22 @@ src/
 ├── types/                domain types
 ├── utils/                geometry, snapping, audio math, formatting, errors, ids
 ├── lib/                  capability detection, class-name helper
-└── test/                 browser API stubs and mediasoup doubles for the unit suite
+└── test/                 browser API stubs, scripted server and media-link doubles
 e2e/                      Playwright scenarios, including authorization, recovery
                           and a twelve-participant load run
 shared/                   protocol schemas and the role capability table — compiled
                           into both the browser and the server
-server/                   the media server: signaling + mediasoup SFU
+server/                   the LiveDeck server: rooms, roles, control, media grants
 ├── Dockerfile            container image; build context is the repo root
 └── src/
-    ├── mediasoup/        config, worker pool, room (router + transports +
-    │                     producers + consumers), peer
-    ├── rooms/            room manager and limits
+    ├── jitsi/            media grants: JaaS (RS256) and self-hosted (HS256) JWTs
+    ├── rooms/            room, peer, room manager and limits
     ├── signaling/        WebSocket server, request handlers, room keys
     ├── security/         rate limiting by category, connection caps
-    ├── turn/             per-session TURN credentials (Cloudflare or coturn)
     ├── http.ts           landing page and /healthz
     └── server.ts         wiring and shutdown
-render.yaml               Render blueprint (HTTP only; see the note inside)
+render.yaml               Render blueprint for the server
+deploy/                   JaaS and hosting guide, one-host Docker setup, local Jitsi
 ```
 
 ## Final note

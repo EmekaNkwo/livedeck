@@ -1,18 +1,11 @@
-# Render blueprint for the LiveDeck media server.
+# Render blueprint for the LiveDeck server.
 #
-# READ THIS BEFORE DEPLOYING HERE
-# -------------------------------
-# The server is now an SFU: every participant's audio and video terminates in
-# this process, over UDP (with a TCP fallback) on the mediasoup media ports.
-# Render web services publish exactly one HTTP port and do not expose UDP, so
-# on Render the media path is limited to TCP via a TURN relay in front of the
-# SFU, which is a worse experience than direct UDP. A host that publishes UDP
-# ports — Fly.io, Railway with TCP/UDP proxies, Hetzner/DigitalOcean/any VPS,
-# or Kubernetes with a hostPort/NodePort — is the right home for this service.
-#
-# This blueprint is kept so the HTTP/WebSocket half still deploys here for
-# evaluation. For real broadcasts use deploy/docker-compose.yml on a host
-# where UDP is reachable; deploy/README.md walks through it.
+# The server runs rooms, roles and director control over one WebSocket, and
+# signs JaaS tokens; audio and video travel through JaaS (Jitsi as a Service).
+# It needs only its HTTP port, which is all a Render web service offers, so it
+# runs here unchanged. Set the three JAAS_* values from the JaaS console
+# (server/.env.example explains each), and ALLOWED_ORIGINS to the studio's
+# origin. Rooms live in one process's memory: keep a single instance.
 #
 # The studio itself is static and is not described here.
 
@@ -35,14 +28,12 @@ services:
         sync: false
       - key: ROOM_KEY_SECRET
         generateValue: true
-      - key: MEDIASOUP_ANNOUNCED_ADDRESS
-        sync: false
-      - key: MEDIASOUP_WORKERS
-        value: "1"
       - key: TRUST_PROXY
         value: "true"
-      # TURN: set one of the two options from server/.env.example.
-      - key: CLOUDFLARE_TURN_KEY_ID
+      - key: JAAS_APP_ID
         sync: false
-      - key: CLOUDFLARE_TURN_API_TOKEN
+      - key: JAAS_API_KEY_ID
+        sync: false
+      # The private key PEM, with newlines written as \n.
+      - key: JAAS_PRIVATE_KEY
         sync: false
